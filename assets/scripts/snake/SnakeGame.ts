@@ -1,4 +1,4 @@
-import { _decorator, Component, Node, EventKeyboard, EventTouch, Input, input, KeyCode, Vec2, view, director, Director, Canvas } from 'cc';
+import { _decorator, Component, Node, EventKeyboard, EventTouch, Input, input, KeyCode, Vec2, view, sys, director, Director, Canvas, ResolutionPolicy } from 'cc';
 import { SnakeView } from './SnakeView';
 import { SnakeAudio } from './SnakeAudio';
 import { DIR_UP, DIR_DOWN, DIR_LEFT, DIR_RIGHT, Dir } from './SnakeCore';
@@ -21,10 +21,11 @@ const { ccclass, property } = _decorator;
  *   2. 触屏用「起点 -> 终点」位移量判定滑动方向，阈值可调。
  *   3. 所有监听在 onDestroy 里成对解绑，避免场景切换后回调指向已销毁节点。
  *
- * 架构分工（三层，互不知道对方实现）：
- *   SnakeView  —— 发生什么（渲染 + 事件广播）
+ * 架构分工（四层，互不知道对方实现）：
+ *   SnakeCore  —— 发生什么（纯逻辑，零引擎依赖）
+ *   SnakeView  —— 画成什么样（渲染 + 事件广播）
  *   SnakeAudio —— 怎么响（订阅事件）
- *   SnakeGame  —— 谁跟谁接（输入 + 装配）
+ *   SnakeGame  —— 谁跟谁接（输入 + 装配 + 屏幕适配）
  */
 @ccclass('SnakeGame')
 export class SnakeGame extends Component {
@@ -35,6 +36,17 @@ export class SnakeGame extends Component {
     @property({ tooltip: '是否启用音效' })
     public enableAudio = true;
 
+    /**
+     * 是否强制竖屏设计分辨率。
+     *
+     * 用 FIXED_WIDTH 策略：**宽度永远铺满屏幕**，高度按设备比例自适应。
+     *   好处：棋盘宽度可以吃满屏幕，手机竖屏下视觉最饱满；
+     *        长屏手机（20:9）会多出纵向空间，正好用来放松一点的上下留白。
+     *   这正是抖音小游戏最常见的适配策略。
+     */
+    @property({ tooltip: '强制竖屏设计分辨率（抖音小游戏需要）' })
+    public forcePortrait = true;
+
     private _view: SnakeView | null = null;
     private _audio: SnakeAudio | null = null;
     private _pending: Dir | null = null;
@@ -43,6 +55,16 @@ export class SnakeGame extends Component {
     private _touchActive = false;
 
     onLoad() {
+        // ---------- ① 屏幕适配（必须在构建界面之前） ----------
+        if (this.forcePortrait) {
+            view.setDesignResolutionSize(720, 1280, ResolutionPolicy.FIXED_WIDTH);
+        }
+
+        // ---------- ② 输出安全区信息 ----------
+        // 刘海屏 / 灵动岛 / 圆角会遮挡边缘，HUD 必须避开。
+        // 引擎给的 safeArea 是**像素值**，需要换算到设计分辨率坐标系。
+        this._logSafeArea();
+
         // 挂到 Canvas 之下，保证处于 2D 渲染根内
         const canvas = this.node.getComponent(Canvas);
         if (!canvas) {
@@ -52,7 +74,7 @@ export class SnakeGame extends Component {
             }
         }
 
-        // ---- 装配：View 与 Audio 都挂到同一个节点下 ----
+        // ---------- ③ 装配：View 与 Audio 都挂到同一个节点下 ----------
         this._view = this.node.getComponent(SnakeView);
         if (!this._view) this._view = this.node.addComponent(SnakeView);
 
@@ -74,6 +96,27 @@ export class SnakeGame extends Component {
         input.on(Input.EventType.TOUCH_END, this._onTouchEnd, this);
 
         console.log('[SnakeGame] 已启动 | WASD/方向键 转向 · R 重开 · 空格 暂停 · M 静音 · 触屏滑动');
+    }
+
+    /** 打印安全区换算结果，方便真机上核对 HUD 有没有被刘海压住 */
+    private _logSafeArea() {
+        try {
+            const visible = view.getVisibleSize();
+            // 注意：安全区 API 在 sys 命名空间上（不是 screen），
+            // 返回「设计分辨率坐标系」下的安全区，无需自己做像素换算。
+            // 引擎已支持 Android / iOS / 微信 / 字节（抖音）小游戏。
+            const sa = sys.getSafeAreaRect();
+            if (!sa || sa.width <= 0 || sa.height <= 0) return;
+            const topInset = (sa.y + sa.height) - visible.height / 2;
+            const bottomInset = -(sa.y - visible.height / 2);
+            console.log(
+                `[SnakeGame] 设计分辨率 ${visible.width.toFixed(0)}x${visible.height.toFixed(0)}` +
+                ` | 安全区 ${sa.width.toFixed(0)}x${sa.height.toFixed(0)}` +
+                ` | 内边距 上${topInset.toFixed(0)} 下${bottomInset.toFixed(0)}`);
+        } catch (e) {
+            // 安全区 API 在个别平台/旧版本可能不可用，绝不能因此影响启动
+            console.warn('[SnakeGame] 读取安全区失败（不影响游戏）:', e);
+        }
     }
 
     onDestroy() {

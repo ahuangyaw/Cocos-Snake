@@ -1,5 +1,6 @@
 import { _decorator, Component, Node, Graphics, UITransform, Color, Label, HorizontalTextAlignment, VerticalTextAlignment, view, sys } from 'cc';
 import { SnakeCore, StepResult, Dir } from './SnakeCore';
+import { computeLayout, LayoutResult } from './layout';
 
 const { ccclass, property } = _decorator;
 
@@ -33,6 +34,16 @@ interface Particle {
 }
 
 /**
+ * 界面布局结果的类型别名。
+ *
+ * 真正的计算逻辑在 layout.ts 的 computeLayout() 里 —— 那是个**纯函数**，
+ * 不依赖任何引擎 API，所以可以在 Node 里用真实设备尺寸做单元测试
+ * （见 tools/test_layout.js，覆盖 iPhone 刘海屏 / 灵动岛 / 各种安卓长屏 / 平板）。
+ * 这里只是引用它的结果类型。
+ */
+type Layout = LayoutResult;
+
+/**
  * SnakeView —— 渲染 + 手感层
  *
  * 架构要点：
@@ -46,8 +57,9 @@ interface Particle {
 @ccclass('SnakeView')
 export class SnakeView extends Component {
 
-    @property({ tooltip: '格子边长（像素）' })
-    public cellSize = 26;
+    // 注意：格子边长不再由编辑器配置。
+    // 它必须由「屏幕尺寸 + 行列数」算出来，否则换设备就会溢出或留白。
+    // 布局参数集中在 _computeLayout()，这里只留纯玩法/手感参数。
 
     @property({ tooltip: '逻辑步长（秒）—— 数值越小蛇越快' })
     public baseStepInterval = 0.16;
@@ -78,11 +90,12 @@ export class SnakeView extends Component {
     private _dyn!: Graphics;        // 动态层（每帧重绘）
     private _overlay!: Graphics;    // 覆盖层（暂停/结束）
 
+    /** 布局结果，onLoad 时算一次 */
+    private _L!: Layout;
+
     private _accum = 0;             // 固定步长累加器
     private _alpha = 0;             // 插值系数 0..1
     private _dirtyBoard = true;
-    private _boardW = 0;
-    private _boardH = 0;
 
     private _shakeTime = 0;
     private _shakeMag = 0;
@@ -139,44 +152,84 @@ export class SnakeView extends Component {
         this._core = new SnakeCore();
         this.loadBest();
 
-        // ---- 按当前可视区域决定格子大小，避免写死分辨率 ----
-        const visible = view.getVisibleSize();
-        const maxBoardH = visible.height - 40;
-        const maxBoardW = visible.width * 0.62;
-        const byH = Math.floor(maxBoardH / this._core.rows);
-        const byW = Math.floor(maxBoardW / this._core.cols);
-        this.cellSize = Math.max(12, Math.min(this.cellSize, byH, byW));
-
-        this._boardW = this._core.cols * this.cellSize;
-        this._boardH = this._core.rows * this.cellSize;
-
+        this._L = this._computeLayout();
         this._buildLayers();
         this._buildHud();
         this._dirtyBoard = true;
+
+        console.log(`[SnakeView] 竖屏布局：格子 ${this._L.cell.toFixed(1)}px，` +
+            `棋盘 ${this._L.boardW.toFixed(0)}x${this._L.boardH.toFixed(0)}，` +
+            `安全区上${this._L.insetTop.toFixed(0)}下${this._L.insetBottom.toFixed(0)}`);
+    }
+
+    /**
+     * 取当前视口与安全区，交给纯函数计算布局。
+     *
+     * 这里只做「从引擎取数据」，不含任何布局数学 ——
+     * 数学全在 layout.ts，那边有 19 条测试覆盖 11 种设备尺寸。
+     * 这样即使布局出问题，也能在 Node 里复现和修复，不依赖真机。
+     */
+    private _computeLayout(): Layout {
+        const visible = view.getVisibleSize();
+
+        let insetTop = 0, insetBottom = 0, insetLeft = 0, insetRight = 0;
+        try {
+            // 安全区 API 在 sys 命名空间上，返回设计分辨率坐标系下的矩形；
+            // 引擎已支持 Android / iOS / 微信 / 字节（抖音）小游戏。
+            const sa = sys.getSafeAreaRect();
+            if (sa && sa.width > 0 && sa.height > 0) {
+                insetLeft = Math.max(0, sa.x);
+                insetBottom = Math.max(0, sa.y);
+                insetRight = Math.max(0, visible.width - (sa.x + sa.width));
+                insetTop = Math.max(0, visible.height - (sa.y + sa.height));
+            }
+        } catch (e) {
+            // 个别平台/旧版本不支持，退回无边距，绝不影响启动
+        }
+
+        return computeLayout(
+            {
+                width: visible.width,
+                height: visible.height,
+                insetTop, insetBottom, insetLeft, insetRight,
+            },
+            this._core.cols,
+            this._core.rows
+        );
     }
 
     // ==================================================================
     // 构建
     // ==================================================================
-    private _makeGraphics(name: string, offsetX = 0): Graphics {
+    private _makeGraphics(name: string, parent: Node): Graphics {
         const node = new Node(name);
         node.layer = this.node.layer;
-        this.node.addChild(node);
-        node.setPosition(offsetX, 0, 0);
+        parent.addChild(node);
+        node.setPosition(0, 0, 0);
         const ui = node.addComponent(UITransform);
-        ui.setAnchorPoint(0.5, 0.5);          // 锚点居中：绘制坐标 = 相对棋盘中心的坐标
-        ui.setContentSize(this._boardW + 40, this._boardH + 40);
+        ui.setAnchorPoint(0.5, 0.5);   // 锚点居中：绘制坐标 = 相对棋盘中心
+        ui.setContentSize(this._L.boardW + 40, this._L.boardH + 40);
         return node.addComponent(Graphics);
     }
 
     private _buildLayers() {
-        // 棋盘整体左移，右侧留给 HUD
-        const shift = -view.getVisibleSize().width * 0.16;
-        this._dynBaseX = shift;
+        // 棋盘组：整体偏移到布局算出的棋盘中心。
+        // 这样一来，棋盘内所有绘制代码都能用「以棋盘中心为原点」的坐标，
+        // 不必到处加上中心偏移 —— 少一处偏移就少一类 bug。
+        const group = new Node('BoardGroup');
+        group.layer = this.node.layer;
+        this.node.addChild(group);
+        group.setPosition(this._L.boardCx, this._L.boardCy, 0);
+
+        this._dynBaseX = 0;
         this._dynBaseY = 0;
-        this._board = this._makeGraphics('Board', shift);
-        this._dyn = this._makeGraphics('Dynamic', shift);
-        this._overlay = this._makeGraphics('Overlay', 0);
+
+        this._board = this._makeGraphics('Board', group);
+        this._dyn = this._makeGraphics('Dynamic', group);
+        // 覆盖层铺满整屏，所以挂在根节点上、不加棋盘偏移
+        this._overlay = this._makeGraphics('Overlay', this.node);
+        const oui = this._overlay.node.getComponent(UITransform);
+        if (oui) oui.setContentSize(this._L.vw * 2, this._L.vh * 2);
     }
 
     private _makeLabel(name: string, x: number, y: number, size: number,
@@ -197,39 +250,41 @@ export class SnakeView extends Component {
     }
 
     private _buildHud() {
-        const visible = view.getVisibleSize();
-        const panelX = visible.width * 0.5 - 130;
-        const top = visible.height * 0.5;
+        const L = this._L;
 
-        // 右侧信息面板：从上往下依次排布，间距留足，避免和标题挤在一起
-        const title = this._makeLabel('Title', panelX, top - 70, 36, PALETTE.accent,
+        // ---- 顶部：标题 ----
+        const title = this._makeLabel('Title', 0, L.hudTitleY, 15, PALETTE.hudDim,
             HorizontalTextAlignment.CENTER);
         title.string = 'SNAKE';
 
-        const sub = this._makeLabel('Sub', panelX, top - 108, 14, PALETTE.hudDim,
-            HorizontalTextAlignment.CENTER);
-        sub.string = '固定步长 · 插值渲染';
-
-        this._lblScore = this._makeLabel('Score', panelX, top - 175, 26, PALETTE.hudText,
+        // ---- 顶部主行：分数（大）----
+        this._lblScore = this._makeLabel('Score', 0, L.hudScoreY, 44, PALETTE.hudText,
             HorizontalTextAlignment.CENTER);
 
-        this._lblBest = this._makeLabel('Best', panelX, top - 215, 18, PALETTE.hudDim,
+        // ---- 分数下方两侧：最高分 / 速度 ----
+        const sideY = L.hudSubY;
+        this._lblBest = this._makeLabel('Best', -L.vw / 2 + 88, sideY, 18, PALETTE.hudDim,
             HorizontalTextAlignment.CENTER);
 
-        this._lblSpeed = this._makeLabel('Speed', panelX, top - 245, 18, PALETTE.hudDim,
+        this._lblSpeed = this._makeLabel('Speed', L.vw / 2 - 88, sideY, 18, PALETTE.hudDim,
             HorizontalTextAlignment.CENTER);
 
-        // 底部操作提示
-        const help = this._makeLabel('Help', panelX, -top + 70, 15, PALETTE.hudDim,
+        // ---- 底部：操作提示 ----
+        const help = this._makeLabel('Help', 0, L.hudHintY, 15, PALETTE.hudDim,
             HorizontalTextAlignment.CENTER);
-        help.string = 'WASD / 方向键\n滑动屏幕\nR 重开 · 空格 暂停';
+        help.string = '滑动屏幕 / WASD 转向 · R 重开 · 空格 暂停 · M 静音';
 
-        // 覆盖层文字（居中在棋盘上方）
-        const boardX = -visible.width * 0.16;
-        this._lblTitle = this._makeLabel('OverlayTitle', boardX, 34, 48,
+        // ---- 覆盖层文字（居中在棋盘上）----
+        this._lblTitle = this._makeLabel('OverlayTitle', 0, L.boardCy + 26, 46,
             new Color(255, 255, 255, 255), HorizontalTextAlignment.CENTER);
-        this._lblTip = this._makeLabel('OverlayTip', boardX, -34, 20,
+        this._lblTip = this._makeLabel('OverlayTip', 0, L.boardCy - 30, 19,
             new Color(200, 214, 240, 255), HorizontalTextAlignment.CENTER);
+
+        // 覆盖层文字要能盖住棋盘，宽度给足
+        for (const lb of [this._lblTitle, this._lblTip]) {
+            const ui = lb.node.getComponent(UITransform);
+            if (ui) ui.setContentSize(L.vw, 60);
+        }
 
         this._refreshHud();
     }
@@ -453,16 +508,18 @@ export class SnakeView extends Component {
     // ==================================================================
     private _cellToPixel(gx: number, gy: number): { x: number; y: number } {
         // 棋盘左下角为格子 (0,0)，绘制原点在棋盘中心
+        const cell = this._L.cell;
         return {
-            x: (gx + 0.5) * this.cellSize - this._boardW / 2,
-            y: (gy + 0.5) * this.cellSize - this._boardH / 2,
+            x: (gx + 0.5) * cell - this._L.boardW / 2,
+            y: (gy + 0.5) * cell - this._L.boardH / 2,
         };
     }
 
     private _cellToPixelLerp(prevX: number, prevY: number, curX: number, curY: number, a: number) {
+        const cell = this._L.cell;
         return {
-            x: ((prevX + (curX - prevX) * a) + 0.5) * this.cellSize - this._boardW / 2,
-            y: ((prevY + (curY - prevY) * a) + 0.5) * this.cellSize - this._boardH / 2,
+            x: ((prevX + (curX - prevX) * a) + 0.5) * cell - this._L.boardW / 2,
+            y: ((prevY + (curY - prevY) * a) + 0.5) * cell - this._L.boardH / 2,
         };
     }
 
@@ -473,36 +530,39 @@ export class SnakeView extends Component {
         const g = this._board;
         g.clear();
 
-        const halfW = this._boardW / 2;
-        const halfH = this._boardH / 2;
+        const boardW = this._L.boardW;
+        const boardH = this._L.boardH;
+        const cell = this._L.cell;
+        const halfW = boardW / 2;
+        const halfH = boardH / 2;
         const pad = 14;
 
         // 外发光底盘
         g.fillColor = new Color(10, 14, 24, 255);
-        g.roundRect(-halfW - pad, -halfH - pad, this._boardW + pad * 2, this._boardH + pad * 2, 18);
+        g.roundRect(-halfW - pad, -halfH - pad, boardW + pad * 2, boardH + pad * 2, 18);
         g.fill();
 
         // 棋盘底色
         g.fillColor = PALETTE.boardBg;
-        g.roundRect(-halfW, -halfH, this._boardW, this._boardH, 10);
+        g.roundRect(-halfW, -halfH, boardW, boardH, 10);
         g.fill();
 
         // 棋盘描边
         g.lineWidth = 2;
         g.strokeColor = PALETTE.boardEdge;
-        g.roundRect(-halfW, -halfH, this._boardW, this._boardH, 10);
+        g.roundRect(-halfW, -halfH, boardW, boardH, 10);
         g.stroke();
 
         // 网格线：所有线段攒进一条路径，最后只 stroke 一次（性能关键）
         g.lineWidth = 1;
         g.strokeColor = PALETTE.gridLine;
         for (let i = 1; i < this._core.cols; i++) {
-            const x = -halfW + i * this.cellSize;
+            const x = -halfW + i * cell;
             g.moveTo(x, -halfH);
             g.lineTo(x, halfH);
         }
         for (let j = 1; j < this._core.rows; j++) {
-            const y = -halfH + j * this.cellSize;
+            const y = -halfH + j * cell;
             g.moveTo(-halfW, y);
             g.lineTo(halfW, y);
         }
@@ -539,7 +599,7 @@ export class SnakeView extends Component {
         if (f.x < 0 || f.y < 0) return;
         const p = this._cellToPixel(f.x, f.y);
         const pulse = 1 + 0.12 * Math.sin(this._time * 6.5);
-        const r = this.cellSize * 0.3 * pulse;
+        const r = this._L.cell * 0.3 * pulse;
 
         // 光晕
         g.fillColor = PALETTE.foodGlow;
@@ -563,7 +623,7 @@ export class SnakeView extends Component {
         if (n === 0) return;
 
         const a = core.alive ? this._alpha : 1;
-        const cell = this.cellSize;
+        const cell = this._L.cell;
         const baseInset = cell * 0.085;
         const cornerR = cell * 0.32;
         const headR = cornerR + cell * 0.06;
@@ -640,7 +700,7 @@ export class SnakeView extends Component {
 
     private _drawEyes(g: Graphics, cx: number, cy: number) {
         const d = this._core.dir;
-        const cell = this.cellSize;
+        const cell = this._L.cell;
         // 眼睛沿运动方向前移，横向分开
         const fx = d.x, fy = d.y;
         const px = -fy, py = fx;                 // 垂直向量

@@ -72,6 +72,22 @@ assets/scripts/snake/
 > 只有第 3 步需要手动操作。其余组件（`SnakeView` / `SnakeAudio`）由 `SnakeGame` 在运行时自动挂载，
 > 所以**场景文件里不存任何自定义脚本的引用** —— 也就不会出现 `Missing Script`。
 
+### 屏幕适配（竖屏）
+
+- **设计分辨率 720×1280 + `FIXED_WIDTH` 策略**：宽度永远铺满屏幕，高度按设备比例自适应。
+  长屏手机（20:9 / 21:9）多出的纵向空间自然分配为上下留白。
+- **安全区适配**：用 `sys.getSafeAreaRect()` 读取刘海 / 灵动岛 / 圆角的内边距，
+  HUD 与棋盘都排布在安全区之内。引擎已支持 Android / iOS / 微信 / 字节（抖音）小游戏。
+- **布局是纯函数**（`assets/scripts/snake/layout.ts`），不依赖任何引擎 API，
+  因此可以用真实设备尺寸做单元测试：
+
+```bash
+node tools/test_layout.js temp/core-js/layout.js
+```
+
+覆盖 iPhone SE / iPhone X 刘海屏 / iPhone 14 Pro 灵动岛 / 各类安卓长屏 / iPad / 极端 1:1 共 11 种尺寸，
+断言「棋盘不溢出」「不压 HUD」「格子不小于可点面积下限」「格子严格正方形」。
+
 ### 可调手感参数
 
 在 `Canvas` 的 `SnakeGame` / `SnakeView` 组件上直接拖：
