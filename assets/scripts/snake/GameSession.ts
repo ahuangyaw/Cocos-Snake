@@ -375,6 +375,52 @@ export class GameSession extends Component {
         }
         if (this._menuBtn) this._menuBtn.setText(mainBtnText);
         if (this._menuBtn2) this._menuBtn2.node.active = showSecondary;
+
+        // 诊断输出：把覆盖层的真实状态打出来。
+        // 之前几轮我都在"看截图猜原因"，效率很低 —— 直接打印比猜可靠得多。
+        // 确认无误后可以把这段降级为仅在需要时开启。
+        this._dumpOverlayState(`setOverlayContent("${title}")`);
+    }
+
+    /** 打印覆盖层与按钮的真实状态（位置 / 文字 / 可见性） */
+    private _dumpOverlayState(tag: string) {
+        const L = this._view ? this._view.layout : null;
+        const parts: string[] = [];
+        parts.push(`[UI诊断] ${tag}`);
+        parts.push(`  屏幕设计尺寸=${this._vw}x${this._vh}`);
+        if (L) {
+            parts.push(`  棋盘 中心(${L.boardCx.toFixed(0)},${L.boardCy.toFixed(0)}) ` +
+                `${L.boardW.toFixed(0)}x${L.boardH.toFixed(0)}`);
+        }
+        parts.push(`  覆盖层 active=${this._overlayRoot ? this._overlayRoot.active : 'null'}` +
+            ` 子节点数=${this._overlayRoot ? this._overlayRoot.children.length : -1}`);
+        if (this._menuTitle) {
+            const p = this._menuTitle.node.position;
+            parts.push(`  标题 "${this._menuTitle.string}" @(${p.x.toFixed(0)},${p.y.toFixed(0)})` +
+                ` active=${this._menuTitle.node.active} size=${this._menuTitle.fontSize}`);
+        } else {
+            parts.push('  标题 = null');
+        }
+        if (this._menuSub) {
+            const p = this._menuSub.node.position;
+            parts.push(`  副标题 "${this._menuSub.string}" @(${p.x.toFixed(0)},${p.y.toFixed(0)})` +
+                ` active=${this._menuSub.node.active}`);
+        } else {
+            parts.push('  副标题 = null');
+        }
+        if (this._menuBtn) parts.push(`  主按钮 ${this._menuBtn.debug()}`);
+        else parts.push('  主按钮 = null');
+        if (this._menuBtn2) parts.push(`  次按钮 ${this._menuBtn2.debug()}`);
+        else parts.push('  次按钮 = null');
+        if (this._btnMenu) parts.push(`  常驻菜单 ${this._btnMenu.debug()}`);
+        if (this._btnMute) parts.push(`  常驻音效 ${this._btnMute.debug()}`);
+        if (this._btnPause) parts.push(`  常驻暂停 ${this._btnPause.debug()}`);
+        console.log(parts.join('\n'));
+    }
+
+    /** 供调试：手动打印当前 UI 状态 */
+    public dumpUiState() {
+        this._dumpOverlayState('手动 dump');
     }
 
     // ==================================================================

@@ -1,4 +1,4 @@
-import { Node, Label, Graphics, UITransform, Button, Color, HorizontalTextAlignment, VerticalTextAlignment, UIOpacity, LabelOutline } from 'cc';
+import { Node, Label, Graphics, UITransform, Button, Color, HorizontalTextAlignment, VerticalTextAlignment, UIOpacity } from 'cc';
 
 /**
  * UI 控件工厂 —— 用代码构建可交互控件，不依赖任何预制体
@@ -77,6 +77,20 @@ export interface ButtonHandle {
     setOn(on: boolean): void;
     /** 整体透明度（禁用态视觉） */
     setOpacity(v: number): void;
+    /** 诊断用：返回该按钮的真实状态（文字、位置、可见性） */
+    debug(): string;
+}
+
+/**
+ * 给 Label 加描边。
+ *
+ * 3.8.2 起 LabelOutline 组件已废弃，改为 Label 自身的三个属性。
+ * 用组件方式会刷一堆 deprecated 警告，而且在新版本可能完全不生效。
+ */
+export function applyOutline(label: Label, color: Color, width: number) {
+    label.enableOutline = true;
+    label.outlineColor = color;
+    label.outlineWidth = width;
 }
 
 /**
@@ -165,10 +179,9 @@ export function makeButton(
         HorizontalTextAlignment.CENTER, width - 16);
     label.string = text;
 
-    // 文字描边：中灰蓝底上的白字再加一圈暗描边，边缘更清晰、更像"按钮"
-    const outline = label.node.addComponent(LabelOutline);
-    outline.color = new Color(12, 18, 30, 220);
-    outline.width = 2;
+    // 文字描边：3.8 起用 Label 自身的 outlineColor / outlineWidth，
+    // 而不是单独的 LabelOutline 组件（那个已废弃，会刷 deprecated 警告）。
+    applyOutline(label, new Color(12, 18, 30, 220), 2);
 
     const opacity = visual.addComponent(UIOpacity);
     opacity.opacity = 255;
@@ -209,6 +222,14 @@ export function makeButton(
         },
         setOpacity(v: number) {
             opacity.opacity = Math.max(0, Math.min(255, Math.round(v)));
+        },
+        debug() {
+            const lp = label.node.position;
+            return `"${label.string}" @(${node.position.x.toFixed(0)},${node.position.y.toFixed(0)})` +
+                ` active=${node.active} labelActive=${label.node.active} ` +
+                `labelPos=(${lp.x.toFixed(0)},${lp.y.toFixed(0)}) ` +
+                `fontSize=${label.fontSize} outline=${label.enableOutline} ` +
+                `opacity=${opacity.opacity} layer=${node.layer}`;
         },
     };
     return handle;
