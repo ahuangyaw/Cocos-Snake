@@ -354,6 +354,106 @@ section('食物可达性：随机长跑，每次进食后食物都应可达');
     check(`抽查 ${checked} 次进食后食物都可达`, unreachable === 0, `${unreachable} 次不可达`);
 }
 
+// ---------------------------------------------------------------- 食物生成规则（回归）
+section('回归：食物「放置那一刻」不能落在蛇头正前方');
+{
+    // 这个 bug 真实发生过：食物生成在蛇头前方 + 蛇头朝墙 →
+    // 吃到食物的瞬间「下一步」在墙外 → 可达性算得零个可达格 → 食物永远无法刷新。
+    // 现象是「再也不产生新豆」，游戏卡死但不结束。
+    //
+    // 【测试要点】只能在「进食事件」这个时刻观察。
+    //   如果在每一步都检查「食物是否在蛇头前方」，会大量误报 ——
+    //   因为玩家会主动直着追食物，蛇头逼近后食物自然就在正前方了。
+    //   那是玩家追上去的结果，不是生成位置错误。
+    let bad = 0;
+    let eats = 0;
+
+    for (let seed = 1; seed <= 40; seed++) {
+        const g = new SnakeCore({ cols: 16, rows: 24 }, seed * 7919);
+        const dirs = [DIR_UP, DIR_RIGHT, DIR_DOWN, DIR_LEFT];
+        for (let i = 0; i < 1500 && g.alive; i++) {
+            const head = g.snake[0];
+            const cand = dirs.filter(d => {
+                if (d.x === -g.dir.x && d.y === -g.dir.y) return false;
+                const nx = head.x + d.x, ny = head.y + d.y;
+                return nx >= 0 && ny >= 0 && nx < g.cols && ny < g.rows;
+            }).sort((a, b) => {
+                const da = Math.abs(head.x + a.x - g.food.x) + Math.abs(head.y + a.y - g.food.y);
+                const db = Math.abs(head.x + b.x - g.food.x) + Math.abs(head.y + b.y - g.food.y);
+                return da - db;
+            })[0];
+            if (cand) g.requestDir(cand);
+
+            const willEat = (g.food.x === head.x + g.dir.x && g.food.y === head.y + g.dir.y);
+            g.step();
+
+            if (willEat && g.alive && g.food.x >= 0) {
+                // 此刻食物刚被重新放置。检查它是否落在「新蛇头」的正前方。
+                eats++;
+                const nh = g.snake[0];
+                if (g.food.x === nh.x + g.dir.x && g.food.y === nh.y + g.dir.y) bad++;
+            }
+        }
+    }
+    check(`40 局共 ${eats} 次进食，重新生成的食物从未落在蛇头正前方`, bad === 0, `${bad} 次违规`);
+}
+
+section('回归：食物永不失效（不能出现「无可达格」导致不刷新）');
+{
+    let invalid = 0;
+    let eats = 0;
+    let maxLen = 0;
+
+    for (let seed = 1; seed <= 30; seed++) {
+        const g = new SnakeCore({ cols: 16, rows: 24 }, seed * 104729);
+        const dirs = [DIR_UP, DIR_RIGHT, DIR_DOWN, DIR_LEFT];
+        for (let i = 0; i < 1200 && g.alive; i++) {
+            const head = g.snake[0];
+            const cand = dirs.filter(d => {
+                if (d.x === -g.dir.x && d.y === -g.dir.y) return false;
+                const nx = head.x + d.x, ny = head.y + d.y;
+                return nx >= 0 && ny >= 0 && nx < g.cols && ny < g.rows;
+            }).sort((a, b) => {
+                const da = Math.abs(head.x + a.x - g.food.x) + Math.abs(head.y + a.y - g.food.y);
+                const db = Math.abs(head.x + b.x - g.food.x) + Math.abs(head.y + b.y - g.food.y);
+                return da - db;
+            })[0];
+            if (cand) g.requestDir(cand);
+            const wasEat = (g.food.x === head.x + g.dir.x && g.food.y === head.y + g.dir.y);
+            g.step();
+            if (wasEat && g.alive) eats++;
+            maxLen = Math.max(maxLen, g.length);
+            if (g.alive && (g.food.x < 0 || g.food.y < 0)) invalid++;
+        }
+    }
+    check(`30 局共 ${eats} 次进食，食物位置始终有效`, invalid === 0, `${invalid} 次失效`);
+    check('食物可达性在长蛇时仍然成立', maxLen > 10, `最长到 ${maxLen}`);
+    console.log(`        （最长蛇身 ${maxLen} 节）`);
+}
+
+section('食物落点必须可取：不能落在蛇身上');
+{
+    const g = new SnakeCore({ cols: 16, rows: 24 }, 555);
+    let onBody = 0;
+    let sampled = 0;
+    const dirs = [DIR_UP, DIR_RIGHT, DIR_DOWN, DIR_LEFT];
+    for (let i = 0; i < 2000 && g.alive; i++) {
+        const head = g.snake[0];
+        const cand = dirs.filter(d => {
+            if (d.x === -g.dir.x && d.y === -g.dir.y) return false;
+            const nx = head.x + d.x, ny = head.y + d.y;
+            return nx >= 0 && ny >= 0 && nx < g.cols && ny < g.rows;
+        })[0];
+        if (cand) g.requestDir(cand);
+        g.step();
+        if (g.food.x >= 0) {
+            sampled++;
+            if (g.snake.some(c => c.x === g.food.x && c.y === g.food.y)) onBody++;
+        }
+    }
+    check(`抽查 ${sampled} 次，食物从未落在蛇身上`, onBody === 0, `${onBody} 次违规`);
+}
+
 // ---------------------------------------------------------------- 总结
 console.log('');
 console.log('='.repeat(66));

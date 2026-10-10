@@ -192,25 +192,65 @@ export class SnakeCore {
     /** 食物不能生成在蛇身上，也不能和当前位置重合 */
     private _placeFood(): void {
         const total = this.cols * this.rows;
+
         if (this.snake.length >= total) {
             // 棋盘被填满 = 通关
             this.food = { x: -1, y: -1 };
             return;
         }
-        // 先从蛇头做一次洪水填充，得到所有「真正走得到」的格子。
+
+        // 蛇头的下一个位置必须排除。
+        //
+        // 【为什么这条至关重要 —— 一个真实踩过的 bug】
+        //   如果食物正好生成在蛇头正前方，会出现两个问题：
+        //     1. 玩家没有任何反应时间就吃到了，体验上是「凭空加分」
+        //     2. 更致命的是会造成**死局**：
+        //        食物贴墙、蛇头朝墙前进 → 吃到食物的瞬间，蛇头的「下一步」
+        //        就是墙外 → 可达性计算得到「零个可达格」→ 食物无法重新生成，
+        //        游戏永远没有食物：既不结束、也不刷新（现象：再也看不到豆）。
+        //   排除这一格，两个问题一起消失。数学上也更合理：
+        //   食物在蛇头下一格 = 必然被立刻吃掉，等于没生成。
+        const hx = this.snake[0].x + this.dir.x;
+        const hy = this.snake[0].y + this.dir.y;
+        const headNext = (hx >= 0 && hy >= 0 && hx < this.cols && hy < this.rows)
+            ? this._idx(hx, hy) : -1;
+
+        // 从蛇头做一次洪水填充，得到所有「真正走得到」的格子。
         // 少了这一步，食物会生成在被蛇身圈起来的死区里 —— 玩家看得见却永远吃不到。
         const reachable = this._reachableFromHead();
         const pool: number[] = [];
         for (let p = 0; p < total; p++) {
-            if (reachable[p]) pool.push(p);
+            if (reachable[p] && p !== headNext) pool.push(p);
         }
+
         if (pool.length === 0) {
-            // 没有可达空格（蛇把自己完全封死），保持原食物
-            this.food = { x: -1, y: -1 };
+            // 没有合法落点（蛇几乎占满棋盘，或把自己完全封死）。
+            //
+            // 这里**绝不能**用 (-1,-1) 之类的哨兵值糊过去 ——
+            // 渲染层无法区分「正常地没有食物」和「异常状态」，
+            // 结果是游戏卡死、既不结束也不刷新。这就是上面那个 bug 的第二半。
+            // 正确做法：给一个合法且未被占用的格子兜底。
+            const fallback = this._anyFreeCell();
+            if (fallback >= 0) {
+                this.food = { x: fallback % this.cols, y: Math.floor(fallback / this.cols) };
+            } else {
+                // 真的一格空位都没有了 —— 棋盘被占满，视为通关
+                this.food = { x: -1, y: -1 };
+            }
             return;
         }
+
         const chosen = pool[Math.floor(this._rand() * pool.length)];
         this.food = { x: chosen % this.cols, y: Math.floor(chosen / this.cols) };
+    }
+
+    /** 找一个没被蛇身占用的格子（线性扫描，仅在极端情况下调用） */
+    private _anyFreeCell(): number {
+        const total = this.cols * this.rows;
+        for (let p = 0; p < total; p++) {
+            if (this._occupied[p] === 0) return p;
+        }
+        return -1;
     }
 
     /**
