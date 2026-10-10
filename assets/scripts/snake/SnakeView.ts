@@ -145,6 +145,15 @@ export class SnakeView extends Component {
     /** 本步内是否刚收到转向输入（用于「临界点提前转身」） */
     private _pendingTurn = false;
 
+    /**
+     * 是否推进游戏逻辑。由上层（GameSession 的状态机）控制。
+     *
+     * 刻意不做成 `setState(GameState)`：那样渲染层就要 import 状态枚举，
+     * 两个模块会互相依赖。这里只暴露一个布尔开关 ——
+     * 渲染层只需要知道「动」或「不动」，不需要知道为什么不动。
+     */
+    public simulate = true;
+
     // ==================================================================
     // 生命周期
     // ==================================================================
@@ -392,7 +401,7 @@ export class SnakeView extends Component {
         }
 
         // ---- 逻辑推进（固定步长） ----
-        if (!this.paused && this._core.alive) {
+        if (!this.paused && this.simulate && this._core.alive) {
             this._accum += dt;
             const interval = this.stepInterval;
 
@@ -416,10 +425,13 @@ export class SnakeView extends Component {
         } else if (!this._core.alive) {
             this._alpha = Math.min(1, this._alpha + dt * 4);
             this._pendingTurn = false;
+        } else if (!this.simulate) {
+            // 暂停模拟时也要清掉待执行的转向，否则恢复瞬间会突然拐弯
+            this._pendingTurn = false;
         }
 
-        // ---- 输入（暂停/死亡期间积压的转向在这里补交） ----
-        if (this._dirProvider && !this.paused && this._core.alive) {
+        // ---- 输入（仅在模拟时消费）----
+        if (this._dirProvider && !this.paused && this.simulate && this._core.alive) {
             const d = this._dirProvider();
             if (d) this._core.requestDir(d);
         }

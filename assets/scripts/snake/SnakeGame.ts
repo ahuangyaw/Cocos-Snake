@@ -1,31 +1,31 @@
-import { _decorator, Component, Node, EventKeyboard, EventTouch, Input, input, KeyCode, Vec2, view, sys, director, Director, Canvas, ResolutionPolicy } from 'cc';
+import { _decorator, Component, EventKeyboard, EventTouch, Input, input, KeyCode, Vec2, view, sys, Canvas, ResolutionPolicy } from 'cc';
 import { SnakeView } from './SnakeView';
 import { SnakeAudio } from './SnakeAudio';
+import { GameSession } from './GameSession';
 import { DIR_UP, DIR_DOWN, DIR_LEFT, DIR_RIGHT, Dir } from './SnakeCore';
 
 const { ccclass, property } = _decorator;
 
 /**
- * SnakeGame —— 输入层与总装配
+ * SnakeGame —— 输入层与总装配（唯一需要手动挂到 Canvas 上的组件）
  *
  * 操作：
- *   W A S D / 方向键  转向
+ *   W A S D / 方向键  转向（仅游戏中生效）
  *   R                 重开
- *   空格              暂停 / 继续
+ *   空格 / Esc        暂停·继续 / 回主菜单
  *   M                 静音切换
- *   鼠标拖拽 / 触屏滑动  转向（为抖音小游戏准备的触屏方案）
+ *   滑动屏幕          转向
+ *   屏幕上的按钮       静音 / 暂停 / 菜单 / 开始 / 再来一局
  *
- * 输入设计要点：
- *   1. 键盘按下**立即**写进逻辑层的输入缓冲队列，不攒到下一帧 ——
- *      攒一帧就多 16ms 延迟，操作手感上这是能感知的。
- *   2. 触屏用「起点 -> 终点」位移量判定滑动方向，阈值可调。
- *   3. 所有监听在 onDestroy 里成对解绑，避免场景切换后回调指向已销毁节点。
+ * 【组件挂载顺序是刻意设计的】
+ *   本组件按 GameSession -> SnakeAudio -> SnakeView 的顺序 addComponent。
+ *   Cocos 按 _components 数组顺序调用 onLoad，所以：
+ *     - GameSession 最先 onLoad，可以安全地先建好界面
+ *     - SnakeView 最后 onLoad，此时它的引用与界面都已就绪
+ *   最后由本组件调用 session.bind() 正式启动状态机。
  *
- * 架构分工（四层，互不知道对方实现）：
- *   SnakeCore  —— 发生什么（纯逻辑，零引擎依赖）
- *   SnakeView  —— 画成什么样（渲染 + 事件广播）
- *   SnakeAudio —— 怎么响（订阅事件）
- *   SnakeGame  —— 谁跟谁接（输入 + 装配 + 屏幕适配）
+ *   这个顺序不是巧合 —— 引擎里「谁先初始化」是最常见的隐性 bug 来源，
+ *   所以把它显式化，而不是听天由命。
  */
 @ccclass('SnakeGame')
 export class SnakeGame extends Component {
@@ -37,19 +37,18 @@ export class SnakeGame extends Component {
     public enableAudio = true;
 
     /**
-     * 是否强制竖屏设计分辨率。
-     *
-     * 用 FIXED_WIDTH 策略：**宽度永远铺满屏幕**，高度按设备比例自适应。
-     *   好处：棋盘宽度可以吃满屏幕，手机竖屏下视觉最饱满；
-     *        长屏手机（20:9）会多出纵向空间，正好用来放松一点的上下留白。
-     *   这正是抖音小游戏最常见的适配策略。
+     * 竖屏设计分辨率。
+     * FIXED_WIDTH：宽度永远铺满屏幕，高度按设备比例自适应。
      */
     @property({ tooltip: '强制竖屏设计分辨率（抖音小游戏需要）' })
     public forcePortrait = true;
 
+    @property({ tooltip: '跳过主菜单直接开始（调试用）' })
+    public skipMenu = false;
+
     private _view: SnakeView | null = null;
     private _audio: SnakeAudio | null = null;
-    private _pending: Dir | null = null;
+    private _session: GameSession | null = null;
 
     private _touchStart: Vec2 = new Vec2();
     private _touchActive = false;
@@ -59,13 +58,9 @@ export class SnakeGame extends Component {
         if (this.forcePortrait) {
             view.setDesignResolutionSize(720, 1280, ResolutionPolicy.FIXED_WIDTH);
         }
-
-        // ---------- ② 输出安全区信息 ----------
-        // 刘海屏 / 灵动岛 / 圆角会遮挡边缘，HUD 必须避开。
-        // 引擎给的 safeArea 是**像素值**，需要换算到设计分辨率坐标系。
         this._logSafeArea();
 
-        // 挂到 Canvas 之下，保证处于 2D 渲染根内
+        // ---------- ② 校验挂载位置 ----------
         const canvas = this.node.getComponent(Canvas);
         if (!canvas) {
             const parent = this.node.parent;
@@ -74,37 +69,46 @@ export class SnakeGame extends Component {
             }
         }
 
-        // ---------- ③ 装配：View 与 Audio 都挂到同一个节点下 ----------
-        this._view = this.node.getComponent(SnakeView);
-        if (!this._view) this._view = this.node.addComponent(SnakeView);
+        // ---------- ③ 装配（顺序见类注释） ----------
+        this._session = this.node.getComponent(GameSession);
+        if (!this._session) this._session = this.node.addComponent(GameSession);
+        this._session.skipMenu = this.skipMenu;
 
         if (this.enableAudio) {
             this._audio = this.node.getComponent(SnakeAudio);
             if (!this._audio) this._audio = this.node.addComponent(SnakeAudio);
-            // 接线：把音频订阅到 View 的事件上
-            this._audio.bind(this._view);
         }
 
-        this._view.setDirectionProvider(() => {
-            const d = this._pending;
-            this._pending = null;      // 取走即清空：每帧最多消费一次
-            return d;
-        });
+        this._view = this.node.getComponent(SnakeView);
+        if (!this._view) this._view = this.node.addComponent(SnakeView);
 
+        // 音频订阅渲染层的事件（音频层不知道玩法，渲染层不知道声音）
+        if (this._audio) this._audio.bind(this._view);
+
+        // ---------- ④ 启动状态机（所有组件已就绪） ----------
+        this._session.bind();
+
+        // ---------- ⑤ 输入监听 ----------
         input.on(Input.EventType.KEY_DOWN, this._onKeyDown, this);
         input.on(Input.EventType.TOUCH_START, this._onTouchStart, this);
         input.on(Input.EventType.TOUCH_END, this._onTouchEnd, this);
 
-        console.log('[SnakeGame] 已启动 | WASD/方向键 转向 · R 重开 · 空格 暂停 · M 静音 · 触屏滑动');
+        console.log('[SnakeGame] 已启动 | 触摸或键盘操作');
     }
 
-    /** 打印安全区换算结果，方便真机上核对 HUD 有没有被刘海压住 */
+    onDestroy() {
+        input.off(Input.EventType.KEY_DOWN, this._onKeyDown, this);
+        input.off(Input.EventType.TOUCH_START, this._onTouchStart, this);
+        input.off(Input.EventType.TOUCH_END, this._onTouchEnd, this);
+    }
+
+    /**
+     * 打印安全区信息，方便真机上核对 HUD 有没有被刘海压住。
+     * 注意：安全区 API 在 sys 命名空间上（不是 screen）。
+     */
     private _logSafeArea() {
         try {
             const visible = view.getVisibleSize();
-            // 注意：安全区 API 在 sys 命名空间上（不是 screen），
-            // 返回「设计分辨率坐标系」下的安全区，无需自己做像素换算。
-            // 引擎已支持 Android / iOS / 微信 / 字节（抖音）小游戏。
             const sa = sys.getSafeAreaRect();
             if (!sa || sa.width <= 0 || sa.height <= 0) return;
             const topInset = (sa.y + sa.height) - visible.height / 2;
@@ -114,49 +118,41 @@ export class SnakeGame extends Component {
                 ` | 安全区 ${sa.width.toFixed(0)}x${sa.height.toFixed(0)}` +
                 ` | 内边距 上${topInset.toFixed(0)} 下${bottomInset.toFixed(0)}`);
         } catch (e) {
-            // 安全区 API 在个别平台/旧版本可能不可用，绝不能因此影响启动
             console.warn('[SnakeGame] 读取安全区失败（不影响游戏）:', e);
         }
     }
 
-    onDestroy() {
-        input.off(Input.EventType.KEY_DOWN, this._onKeyDown, this);
-        input.off(Input.EventType.TOUCH_START, this._onTouchStart, this);
-        input.off(Input.EventType.TOUCH_END, this._onTouchEnd, this);
-    }
-
-    // ------------------------------------------------------------------
+    // ==================================================================
     // 键盘
-    // ------------------------------------------------------------------
+    // ==================================================================
     private _onKeyDown(e: EventKeyboard) {
-        // 输入立刻交给逻辑层的缓冲队列 —— 不要攒到下一帧的 update 里再传。
-        // 攒一帧就多 16ms 延迟，操作手感上这是能感知的。
-        // 队列自带「反向拒绝 / 同向忽略 / 上限 2」的保护，所以立即调用是安全的。
-        const v = this._view;
+        const s = this._session;
+
         switch (e.keyCode) {
             case KeyCode.KEY_W:
             case KeyCode.ARROW_UP:
-                this._push(DIR_UP); break;
+                this._pushDirection(DIR_UP); break;
             case KeyCode.KEY_S:
             case KeyCode.ARROW_DOWN:
-                this._push(DIR_DOWN); break;
+                this._pushDirection(DIR_DOWN); break;
             case KeyCode.KEY_A:
             case KeyCode.ARROW_LEFT:
-                this._push(DIR_LEFT); break;
+                this._pushDirection(DIR_LEFT); break;
             case KeyCode.KEY_D:
             case KeyCode.ARROW_RIGHT:
-                this._push(DIR_RIGHT); break;
+                this._pushDirection(DIR_RIGHT); break;
+
             case KeyCode.KEY_R:
-                if (v) { v.restart(); console.log('[SnakeGame] 重开'); }
+                if (s) s.requestRestart();
                 break;
             case KeyCode.SPACE:
-                if (v) {
-                    v.setPaused(!v.paused);
-                    console.log('[SnakeGame]', v.paused ? '暂停' : '继续');
-                }
+                if (s) s.requestTogglePause();
                 break;
             case KeyCode.KEY_M:
-                if (this._audio) this._audio.toggleMute();
+                if (s) s.requestToggleMute();
+                break;
+            case KeyCode.ESCAPE:
+                if (s) s.requestMenu();
                 break;
             default:
                 break;
@@ -166,40 +162,40 @@ export class SnakeGame extends Component {
     /**
      * 把方向写进逻辑层缓冲，并通知渲染层「本步已收到新输入」。
      *
-     * 通知渲染层是为了实现「临界点提前转身」：如果玩家在一步的后段才按方向，
-     * 立刻结束这一步会让操作显得跟手（详见 SnakeView.notifyDirectionInput）。
+     * 两件重要的事：
+     *   1. **立即**写入，不攒到下一帧 —— 攒一帧就多 16ms 延迟，手感上能感知。
+     *   2. 只在游戏中接受方向输入。菜单里按方向键不应该让蛇转向。
      */
-    private _push(d: Dir) {
+    private _pushDirection(d: Dir) {
+        const s = this._session;
         const v = this._view;
-        if (!v || v.paused || !v.core.alive) {
-            // 暂停或已死亡时仍然记录，等恢复后不丢操作
-            this._pending = d;
-            return;
-        }
+        if (!v) return;
+
+        // 非游戏状态：方向键用来在菜单里做不了什么，直接忽略
+        if (s && !s.acceptsDirectionInput) return;
+
         if (v.core.requestDir(d)) {
             v.notifyDirectionInput();
         }
     }
 
-    // ------------------------------------------------------------------
+    // ==================================================================
     // 触屏 / 鼠标滑动
-    // ------------------------------------------------------------------
+    // ==================================================================
     private _onTouchStart(e: EventTouch) {
         const p = e.getUILocation();
         this._touchStart.set(p.x, p.y);
         this._touchActive = true;
-
-        // 触屏时也支持"点一下即暂停/重开"的兜底：游戏结束状态下点击重开
-        const v = this._view;
-        if (v && !v.core.alive) {
-            v.restart();
-            this._touchActive = false;
-        }
     }
 
     private _onTouchEnd(e: EventTouch) {
         if (!this._touchActive) return;
         this._touchActive = false;
+
+        const s = this._session;
+        // 只在游戏中响应滑动转向。
+        // 否则在菜单里滑动会往缓冲里塞方向，玩家点「开始」的瞬间蛇就自己拐弯了。
+        if (s && !s.acceptsDirectionInput) return;
 
         const p = e.getUILocation();
         const dx = p.x - this._touchStart.x;
@@ -211,46 +207,9 @@ export class SnakeGame extends Component {
 
         // 取主轴方向 —— 同样立刻生效，不等下一帧
         if (ax > ay) {
-            this._push(dx > 0 ? DIR_RIGHT : DIR_LEFT);
+            this._pushDirection(dx > 0 ? DIR_RIGHT : DIR_LEFT);
         } else {
-            this._push(dy > 0 ? DIR_UP : DIR_DOWN);
+            this._pushDirection(dy > 0 ? DIR_UP : DIR_DOWN);
         }
     }
 }
-
-// ======================================================================
-// 零配置启动：不需要你手动往场景里挂组件
-//
-// 原理：监听「场景启动完成」事件，自动在 Canvas 下建一个节点并挂上 SnakeGame。
-// 对于首次体验/做 demo，这能省掉所有编辑器操作；正式项目里删掉这段即可。
-// ======================================================================
-let _autoBooted = false;
-
-function autoBoot() {
-    if (_autoBooted) return;
-
-    const scene = director.getScene();
-    if (!scene) return;
-
-    // 场景里已经手动挂了 SnakeGame？那就尊重手动配置，不重复创建
-    let canvas: Node | null = null;
-    const stack: Node[] = scene.children.slice();
-    while (stack.length) {
-        const n = stack.pop()!;
-        if (n.getComponent(SnakeGame)) return;
-        if (!canvas && n.getComponent(Canvas)) canvas = n;
-        if (n.children.length) stack.push(...n.children);
-    }
-    if (!canvas) return;
-
-    const node = new Node('SnakeGame');
-    node.layer = canvas.layer;               // 继承 UI_2D 层
-    canvas.addChild(node);
-    node.setPosition(0, 0, 0);
-    node.addComponent(SnakeGame);
-
-    _autoBooted = true;
-    console.log('[AutoBoot] 已在 Canvas 下自动创建 SnakeGame 节点');
-}
-
-director.on(Director.EVENT_AFTER_SCENE_LAUNCH, autoBoot);
