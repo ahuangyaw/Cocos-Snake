@@ -1,4 +1,4 @@
-import { _decorator, Component, EventKeyboard, EventTouch, Input, input, KeyCode, Vec2, view, screen, sys, Canvas, ResolutionPolicy } from 'cc';
+import { _decorator, Component, Node, EventKeyboard, EventTouch, Input, input, KeyCode, Vec2, view, screen, sys, Canvas, ResolutionPolicy, director, Director } from 'cc';
 import { SnakeView } from './SnakeView';
 import { SnakeAudio } from './SnakeAudio';
 import { GameSession } from './GameSession';
@@ -288,3 +288,62 @@ export class SnakeGame extends Component {
         }
     }
 }
+
+// ======================================================================
+// 零配置自启动
+//
+// 【为什么需要它】
+//   本组件需要挂在 Canvas 节点上，也就是要在 main.scene 里存一条组件引用。
+//   但实践下来这条引用**反复丢失**：编辑器会用内存里的场景覆盖磁盘，
+//   把我们在文件里写的内容抹掉。表现出来就是「黑屏 + Console 什么都没有」——
+//   因为这个组件根本没实例化，一行日志都不会有。
+//
+// 【做法】
+//   在脚本模块里注册一个「场景启动完成」监听（模块级代码，不依赖任何组件）。
+//   Cocos 启动时会执行项目里所有用户脚本（@ccclass 注册就靠这个机制），
+//   所以这段代码一定会被执行；用 once 避免多次触发。
+//
+//   这样即使场景里没有任何引用，游戏也能跑起来。
+//   注意：只创建**一个**节点，且必须先确认场景里确实没有手动挂的实例，
+//   否则会出现两个游戏实例互相打架。
+// ======================================================================
+let _autoBootDone = false;
+
+function autoBootScan(scene: any) {
+    if (_autoBootDone || !scene) return;
+
+    // 场景里已经有手动挂的 → 尊重它，不重复创建
+    const stack: any[] = (scene.children || []).slice();
+    let canvasNode: any = null;
+    while (stack.length) {
+        const n = stack.pop();
+        if (!n) continue;
+        if (n.getComponent && n.getComponent(SnakeGame)) {
+            _autoBootDone = true;
+            return;
+        }
+        if (!canvasNode && n.getComponent && n.getComponent(Canvas)) canvasNode = n;
+        if (n.children && n.children.length) stack.push.apply(stack, n.children);
+    }
+    if (!canvasNode) return;
+
+    const node = new Node('SnakeGame');
+    node.layer = canvasNode.layer;      // 继承 UI_2D 层，否则相机看不见
+    canvasNode.addChild(node);
+    node.setPosition(0, 0, 0);
+    node.addComponent(SnakeGame);
+
+    _autoBootDone = true;
+    console.log('[AutoBoot] 场景里没有 SnakeGame 组件，已自动创建（无需手动挂载）');
+}
+
+director.once(Director.EVENT_AFTER_SCENE_LAUNCH, () => {
+    autoBootScan(director.getScene());
+});
+
+// 兜底：万一模块执行时机晚于场景启动事件（不同版本/平台的启动顺序可能有差异），
+// 这一次性定时器仍能补上。scheduleOnce 不带组件也能用（走全局调度器），
+// 不受「组件实例是否存在」的影响。重复调用是安全的 —— autoBootScan 有 _autoBootDone 守卫。
+director.once(Director.EVENT_BEFORE_UPDATE, () => {
+    autoBootScan(director.getScene());
+});
