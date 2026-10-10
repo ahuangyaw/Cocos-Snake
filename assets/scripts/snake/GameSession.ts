@@ -3,6 +3,7 @@ import { SnakeView } from './SnakeView';
 import { SnakeAudio } from './SnakeAudio';
 import { GameState, StateMachine } from './StateMachine';
 import { makeButton, ButtonHandle, makeLabel, makeDimOverlay, UI, STYLE_PRIMARY, STYLE_DEFAULT } from './UIFactory';
+import { Platform, STORAGE_KEYS } from './Platform';
 
 const { ccclass, property } = _decorator;
 
@@ -34,6 +35,12 @@ export class GameSession extends Component {
     @property({ tooltip: '是否在启动后直接进入游戏（调试用；关掉则先进主菜单）' })
     public skipMenu = false;
 
+    @property({ tooltip: '是否启用触感震动（支持的小游戏平台生效）' })
+    public vibrateEnabled = true;
+
+    /** 由 SnakeGame 注入：任何用户手势发生时调用（用于解锁音频） */
+    public onUserGesture: (() => void) | null = null;
+
     private _view: SnakeView | null = null;
     private _audio: SnakeAudio | null = null;
     private _fsm: StateMachine = new StateMachine(GameState.BOOT);
@@ -49,6 +56,7 @@ export class GameSession extends Component {
     private _menuSub: Label | null = null;
     private _menuBtn: ButtonHandle | null = null;
     private _menuBtn2: ButtonHandle | null = null;
+    private _btnShare: ButtonHandle | null = null;
 
     private _vw = 0;
     private _vh = 0;
@@ -117,6 +125,30 @@ export class GameSession extends Component {
         // 同步一次静音按钮外观
         if (this._audio) this._syncMuteButton(this._audio.muted);
 
+        // ---- 平台能力接线 ----
+
+        // 震动反馈：轻微震动用于吃到食物，强震用于死亡。
+        // 抖音/微信小游戏都支持 vibrateShort / vibrateLong；Web 上静默跳过。
+        // 注意这是"锦上添花"的反馈，不能影响主流程 —— Platform 里已经做了降级。
+        view.onEat = () => {
+            if (this.vibrateEnabled) Platform.vibrateShort();
+        };
+        view.onDeath = () => {
+            if (this.vibrateEnabled) Platform.vibrateLong();
+        };
+
+        // 前后台切换：切到后台自动暂停。
+        // 不这么做的话，玩家切出去再回来会发现蛇已经撞墙了（后台期间逻辑仍在推进）。
+        Platform.onHide(() => {
+            if (this._fsm.is(GameState.PLAYING)) {
+                this._fsm.go(GameState.PAUSED);
+                console.log('[GameSession] 切到后台，自动暂停');
+            }
+        });
+        Platform.onShow(() => {
+            console.log('[GameSession] 回到前台');
+        });
+
         // 现在 SnakeView 已就绪，用它的布局结果重新定位按钮。
         // onLoad 时 SnakeView 可能还不存在，那时用的是兜底尺寸。
         this._applyLayout();
@@ -182,6 +214,7 @@ export class GameSession extends Component {
         }
         if (this._menuBtn) this._menuBtn.node.setPosition(0, -this._vh / 2 + 300, 0);
         if (this._menuBtn2) this._menuBtn2.node.setPosition(0, -this._vh / 2 + 206, 0);
+        if (this._btnShare) this._btnShare.node.setPosition(0, -this._vh / 2 + 136, 0);
     }
 
     /** 屏幕尺寸/方向变化时重新定位（与 SnakeView.rebuildForResize 配合） */
@@ -289,6 +322,22 @@ export class GameSession extends Component {
         // 次按钮：菜单里隐藏；结束时用来「返回主菜单」
         this._menuBtn2 = makeButton('MenuBtnSecondary', root, 0, 0, 200, 56,
             '返回主菜单', 20, () => this._fsm.go(GameState.MENU), STYLE_DEFAULT);
+
+        // 分享按钮：只在小游戏平台显示（Web 上 Platform.canShare 为 false，会被隐藏）
+        this._btnShare = makeButton('MenuBtnShare', root, 0, 0, 200, 56,
+            '晒成绩', 20, () => this._shareScore(), STYLE_DEFAULT);
+        this._btnShare.node.active = false;
+    }
+
+    /** 分享本局成绩。分享是可选加成，失败也不影响游戏 */
+    private _shareScore() {
+        const score = (this._view && this._view.core) ? this._view.core.score : 0;
+        const best = this._view ? this._view.best : 0;
+        const ok = Platform.share(
+            `我在贪吃蛇拿了 ${score} 分，最高 ${best} 分，来挑战我！`,
+            '经典贪吃蛇 · 看你能吃多少',
+        );
+        if (!ok) console.log('[GameSession] 当前平台不支持分享');
     }
 
     /** 主按钮的行为随状态变化：菜单里是「开始」，结束时是「再来一局」 */
@@ -297,9 +346,6 @@ export class GameSession extends Component {
         if (this.onUserGesture) this.onUserGesture();
         this._fsm.go(GameState.PLAYING);
     }
-
-    /** 由 SnakeGame 注入：任何用户手势发生时调用（用于解锁音频） */
-    public onUserGesture: (() => void) | null = null;
 
     // ==================================================================
     // 状态变化 —— 界面在这里统一刷新，而不是到处散落 if
@@ -375,6 +421,10 @@ export class GameSession extends Component {
         }
         if (this._menuBtn) this._menuBtn.setText(mainBtnText);
         if (this._menuBtn2) this._menuBtn2.node.active = showSecondary;
+        // 分享按钮只在支持分享的平台出现（Web 上直接隐藏，不留死按钮）
+        if (this._btnShare) {
+            this._btnShare.node.active = showSecondary && Platform.canShare;
+        }
 
         // 诊断输出：把覆盖层的真实状态打出来。
         // 之前几轮我都在"看截图猜原因"，效率很低 —— 直接打印比猜可靠得多。

@@ -1,5 +1,6 @@
 import { _decorator, Component, resources, AudioClip, AudioSource } from 'cc';
 import { SnakeView } from './SnakeView';
+import { Platform, STORAGE_KEYS } from './Platform';
 
 const { ccclass, property } = _decorator;
 
@@ -42,6 +43,15 @@ export class SnakeAudio extends Component {
     // 加载
     // ==================================================================
     onLoad() {
+        // 读回用户的静音偏好 —— 这是"用户偏好"，应该跨局、跨启动保留
+        try {
+            const saved = Platform.getString(STORAGE_KEYS.MUTED, '');
+            if (saved === '1') this.muted = true;
+            else if (saved === '0') this.muted = false;
+        } catch (e) {
+            // 读不到就用默认值，不影响游戏
+        }
+
         this._sfx = this.node.addComponent(AudioSource);
         this._sfx.loop = false;
         this._sfx.playOnAwake = false;
@@ -148,6 +158,8 @@ export class SnakeAudio extends Component {
     public toggleMute(): boolean {
         this.muted = !this.muted;
         if (this._sfx) this._sfx.volume = this.muted ? 0 : this.volume;
+        // 持久化用户偏好（走平台层，小游戏上是 tt.setStorageSync）
+        Platform.setString(STORAGE_KEYS.MUTED, this.muted ? '1' : '0');
         console.log('[SnakeAudio]', this.muted ? '已静音' : '已开启声音');
         return this.muted;
     }

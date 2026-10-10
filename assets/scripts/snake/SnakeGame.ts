@@ -2,6 +2,7 @@ import { _decorator, Component, Node, EventKeyboard, EventTouch, Input, input, K
 import { SnakeView } from './SnakeView';
 import { SnakeAudio } from './SnakeAudio';
 import { GameSession } from './GameSession';
+import { Platform } from './Platform';
 import { DIR_UP, DIR_DOWN, DIR_LEFT, DIR_RIGHT, Dir } from './SnakeCore';
 
 const { ccclass, property } = _decorator;
@@ -76,6 +77,10 @@ export class SnakeGame extends Component {
     onLoad() {
         // ---------- ① 屏幕适配 ----------
         this._applyDesignResolution();
+
+        // 打印平台信息 —— 这是排查"到底跑在 Web 还是抖音"的第一手依据。
+        // 小游戏平台上很多问题（存储/音频/触摸）都与平台相关，先确认平台再谈别的。
+        console.log('[SnakeGame] ' + Platform.describe());
 
         // 屏幕尺寸/方向变化时重新适配并重建布局。
         // 3.8 起用 screen.on 监听（view.setResizeCallback 已废弃）。

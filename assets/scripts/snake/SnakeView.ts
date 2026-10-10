@@ -1,6 +1,7 @@
 import { _decorator, Component, Node, Graphics, UITransform, Color, Label, HorizontalTextAlignment, VerticalTextAlignment, view, sys } from 'cc';
 import { SnakeCore, StepResult, Dir } from './SnakeCore';
 import { computeLayout, LayoutResult } from './layout';
+import { Platform, STORAGE_KEYS } from './Platform';
 
 const { ccclass, property } = _decorator;
 
@@ -412,18 +413,16 @@ export class SnakeView extends Component {
     // ==================================================================
     // 最高分持久化
     //
-    // 用 sys.localStorage：在浏览器里就是 localStorage，
-    // 在抖音小游戏里 Cocos 的适配层会把它映射到 tt.setStorageSync。
-    // 所以同一份代码，Web 与抖音小游戏都能用 —— 这是选它而不是直接写
-    // window.localStorage 的原因。
+    // 走 Platform 抽象层，而不是直接调 sys.localStorage。差别很重要：
+    //   - 抖音小游戏走 tt.setStorageSync，Web 走 localStorage，由 Platform 决定
+    //   - 平台存储可能因隐私模式/配额失败，Platform 会降级到内存并返回是否持久化成功
+    //   - 存档失败不能拖垮游戏：读失败用默认值，写失败就只存在内存里
     // ==================================================================
-    private static readonly BEST_KEY = 'snake.best.v1';
-
     public loadBest(): void {
         try {
-            const raw = sys.localStorage.getItem(SnakeView.BEST_KEY);
+            const raw = Platform.getString(STORAGE_KEYS.BEST_SCORE, '');
             const v = raw ? parseInt(raw, 10) : 0;
-            this.best = isNaN(v) || v < 0 ? 0 : v;
+            this.best = (isNaN(v) || v < 0) ? 0 : v;
         } catch (e) {
             this.best = 0;
             console.warn('[SnakeView] 读取最高分失败:', e);
@@ -431,11 +430,10 @@ export class SnakeView extends Component {
     }
 
     private saveBest(v: number) {
-        try {
-            sys.localStorage.setItem(SnakeView.BEST_KEY, String(Math.floor(v)));
-        } catch (e) {
-            // 小游戏平台可能在隐私模式下拒绝写入 —— 不能让存档失败拖垮游戏
-            console.warn('[SnakeView] 保存最高分失败:', e);
+        const ok = Platform.setString(STORAGE_KEYS.BEST_SCORE, String(Math.floor(v)));
+        if (!ok) {
+            // 已经在 Platform 里打过警告，这里只说明影响面
+            console.log('[SnakeView] 最高分本次运行内有效，但未能写入持久化存储');
         }
     }
 

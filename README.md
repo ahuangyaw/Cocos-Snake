@@ -30,6 +30,8 @@ assets/scripts/snake/
 ├── SnakeCore.ts      纯逻辑核心 —— 不 import 任何 cc，可脱离引擎单测
 ├── StateMachine.ts   游戏流程状态机 —— 纯逻辑，拒绝非法切换
 ├── layout.ts         竖屏布局数学 —— 纯函数，按真实设备尺寸单测
+├── PlatformCore.ts   平台探测 + 存储降级 —— 纯逻辑，可按平台组合单测
+├── Platform.ts       平台适配层 —— 抖音 tt / 微信 wx / Web 统一接口
 ├── SnakeView.ts      渲染 + 手感 —— 只读核心状态，只负责画
 ├── UIFactory.ts      可点击控件工厂 —— 代码生成按钮，不依赖预制体
 ├── SnakeAudio.ts     音频层 —— 只订阅事件，不问玩法
@@ -59,6 +61,8 @@ BOOT ──▶ MENU ──▶ PLAYING ⇄ PAUSED
 | `SnakeCore` | 规则、格子坐标、固定步长 | **可在 Node 里跑测试**，可移植，确定性 |
 | `StateMachine` | 流程合法性 | 流程 bug 基本绝迹 |
 | `layout` | 布局数学 | 换设备不用真机验证，单测覆盖 |
+| `PlatformCore` | 平台探测 + 存储降级策略 | 平台组合与失败路径可离线验证 |
+| `Platform` | 存储 / 震动 / 分享 / 生命周期 | **游戏代码不认识抖音**，一份代码跑全平台 |
 | `SnakeView` | 插值渲染、粒子、震屏 | 换美术风格不用动逻辑 |
 | `UIFactory` | 可点击控件 | 按钮不用预制体，没有 uuid 失配风险 |
 | `SnakeAudio` | 订阅事件决定配什么声音 | 加/换/静音音效不动渲染层 |
@@ -66,6 +70,57 @@ BOOT ──▶ MENU ──▶ PLAYING ⇄ PAUSED
 | `SnakeGame` | 输入 + 装配 | 唯一知道全局的地方 |
 
 **各层互不知道对方实现细节** —— 这是可维护性的来源，也是能持续加功能不失控的前提。
+
+---
+
+## 平台适配（抖音小游戏）
+
+### 设计：游戏代码不认识平台
+
+平台差异全部收敛在 `Platform` 一个文件里：
+
+```ts
+// 游戏代码只写这个 —— 底下走 tt / wx / localStorage 由 Platform 决定
+Platform.setInt(STORAGE_KEYS.BEST_SCORE, score);
+Platform.vibrateShort();
+Platform.share('我拿了 120 分！');
+```
+
+**平台识别优先用引擎的 `sys.platform`**（`sys.Platform.BYTEDANCE_MINI_GAME`），
+全局对象嗅探（`tt` / `wx` / `my` / `qg` / `hbs`）作为兜底 ——
+后者能覆盖「在抖音开发者工具里跑 Web 版调试」这类情况。
+
+### 存储：永不失败
+
+平台存储可能因**隐私模式 / 配额 / 平台 bug** 而失败。策略是三层：
+
+| 层 | 行为 |
+| --- | --- |
+| 小游戏平台 | `tt.getStorageSync` / `tt.setStorageSync` |
+| Web / 原生 | 引擎的 `sys.localStorage` |
+| **内存兜底** | 底层失败时保留一份，保证**本次运行内数据一致**，下次写入成功时落盘 |
+
+关键约定：**所有存储 API 永不抛异常**。写入失败返回 `false` 告知调用方「未持久化」，
+但玩家不会看到崩溃，也不会看到分数凭空消失。
+
+### 已接入的平台能力
+
+| 能力 | 说明 |
+| --- | --- |
+| **存储** | 最高分、静音偏好（用户偏好跨启动保留） |
+| **震动** | 吃到食物轻震、死亡强震；无马达平台静默跳过 |
+| **分享** | 结束界面「晒成绩」按钮，**仅支持分享的平台显示**；失败不影响游戏 |
+| **生命周期** | 切后台自动暂停（否则玩家回来会发现蛇已撞死） |
+
+> ⚠️ 抖音对「诱导分享」有限制，且分享成功回调不可靠。
+> 所以分享只作为可选加成，**不作为游戏进度的必要条件**。
+
+### 需要的构建扩展
+
+Cocos Creator **3.8.8 默认不包含抖音构建目标**。自带的平台扩展是：
+`wechatgame` / `taobao-mini-game` / `oppo-mini-game` / `vivo-mini-game` / `huawei-quick-game`。
+
+抖音支持需要单独安装，见 [docs/03-抖音小游戏适配指南.md](docs/03-抖音小游戏适配指南.md)。
 
 ---
 
@@ -131,8 +186,17 @@ node tools/test_layout.js temp/core-js/layout.js
 工程自带一套纯标准库的验证脚本（不需要装任何依赖）：
 
 ```bash
-# 逻辑核心单元测试（51 条，不需要 Cocos 编辑器）
+# 逻辑核心单元测试（55 条，不需要 Cocos 编辑器）
 node tools/test_snake_core.js temp/core-js/SnakeCore.js
+
+# 流程状态机测试（35 条，含 20 组状态切换穷举）
+node tools/test_state_machine.js temp/core-js/StateMachine.js
+
+# 竖屏布局测试（19 条，覆盖 11 种设备尺寸 + 控件重叠检测）
+node tools/test_layout.js temp/core-js/layout.js
+
+# 平台探测与存储降级测试（40 条，覆盖各平台组合与失败路径）
+node tools/test_platform.js temp/core-js/PlatformCore.js
 
 # 重新合成音效 + 校验（无削波 / 无直流偏移 / 无爆音 / 包络正确衰减）
 node tools/make_audio.js
@@ -150,6 +214,8 @@ python tools/preview_gitignore.py
 # 生成 2D 贴图（纯标准库手写 PNG 编码器）
 python tools/make_art.py
 ```
+
+**共 149 条自动化测试**（55 逻辑 + 35 状态机 + 19 布局 + 40 平台），全部可在无编辑器环境下运行。
 
 ---
 
