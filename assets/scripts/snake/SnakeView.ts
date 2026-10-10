@@ -1,4 +1,4 @@
-import { _decorator, Component, Node, Graphics, UITransform, Color, Label, HorizontalTextAlignment, VerticalTextAlignment, view } from 'cc';
+import { _decorator, Component, Node, Graphics, UITransform, Color, Label, HorizontalTextAlignment, VerticalTextAlignment, view, sys } from 'cc';
 import { SnakeCore, StepResult, Dir } from './SnakeCore';
 
 const { ccclass, property } = _decorator;
@@ -104,6 +104,30 @@ export class SnakeView extends Component {
     public best = 0;
     public onGameOver: ((score: number) => void) | null = null;
 
+    /**
+     * 事件钩子 —— 渲染层对外「广播」发生了什么，但**完全不知道谁会听**。
+     *
+     * 这是本项目的分层原则：
+     *   SnakeView 只管把发生的事说出来，音频层 / 震动层 / 统计层自己去订阅。
+     *   好处：以后加「音效」「手柄震动」「埋点上报」都不用改渲染层一行代码。
+     *   坏处：比直接调用多一层间接 —— 但游戏越长，这一层越值钱。
+     */
+    public onEat: ((comboLevel: number) => void) | null = null;
+    public onDirectionTurn: (() => void) | null = null;
+    public onDeath: (() => void) | null = null;
+    public onNewRecord: (() => void) | null = null;
+    public onRestart: (() => void) | null = null;
+
+    /** 连击等级：短时间内连续吃到食物就递增，用来给音效升调 */
+    private _comboLevel = 0;
+    private _comboTimer = 0;
+    private readonly COMBO_WINDOW = 1.1;
+
+    private _bumpCombo() {
+        this._comboLevel = this._comboTimer > 0 ? Math.min(5, this._comboLevel + 1) : 0;
+        this._comboTimer = this.COMBO_WINDOW;
+    }
+
     private _dirProvider: (() => Dir | null) | null = null;
     /** 本步内是否刚收到转向输入（用于「临界点提前转身」） */
     private _pendingTurn = false;
@@ -113,6 +137,7 @@ export class SnakeView extends Component {
     // ==================================================================
     onLoad() {
         this._core = new SnakeCore();
+        this.loadBest();
 
         // ---- 按当前可视区域决定格子大小，避免写死分辨率 ----
         const visible = view.getVisibleSize();
@@ -233,6 +258,7 @@ export class SnakeView extends Component {
      */
     public notifyDirectionInput() {
         this._pendingTurn = true;
+        if (this.onDirectionTurn) this.onDirectionTurn();
     }
 
     public get core(): SnakeCore {
@@ -247,9 +273,42 @@ export class SnakeView extends Component {
         this._particles.length = 0;
         this._shakeTime = 0;
         this._deathFlash = 0;
+        this._comboLevel = 0;
+        this._comboTimer = 0;
         this.paused = false;
         this._setOverlay('');
         this._refreshHud();
+        if (this.onRestart) this.onRestart();
+    }
+
+    // ==================================================================
+    // 最高分持久化
+    //
+    // 用 sys.localStorage：在浏览器里就是 localStorage，
+    // 在抖音小游戏里 Cocos 的适配层会把它映射到 tt.setStorageSync。
+    // 所以同一份代码，Web 与抖音小游戏都能用 —— 这是选它而不是直接写
+    // window.localStorage 的原因。
+    // ==================================================================
+    private static readonly BEST_KEY = 'snake.best.v1';
+
+    public loadBest(): void {
+        try {
+            const raw = sys.localStorage.getItem(SnakeView.BEST_KEY);
+            const v = raw ? parseInt(raw, 10) : 0;
+            this.best = isNaN(v) || v < 0 ? 0 : v;
+        } catch (e) {
+            this.best = 0;
+            console.warn('[SnakeView] 读取最高分失败:', e);
+        }
+    }
+
+    private saveBest(v: number) {
+        try {
+            sys.localStorage.setItem(SnakeView.BEST_KEY, String(Math.floor(v)));
+        } catch (e) {
+            // 小游戏平台可能在隐私模式下拒绝写入 —— 不能让存档失败拖垮游戏
+            console.warn('[SnakeView] 保存最高分失败:', e);
+        }
     }
 
     public get stepInterval(): number {
@@ -270,6 +329,12 @@ export class SnakeView extends Component {
         if (this._deathFlash > 0) this._deathFlash = Math.max(0, this._deathFlash - dt * 2.2);
         if (this._shakeTime > 0) this._shakeTime = Math.max(0, this._shakeTime - dt);
         if (this._eatPop > 0) this._eatPop = Math.max(0, this._eatPop - dt * 3.5);
+
+        // ---- 连击窗口计时 ----
+        if (this._comboTimer > 0) {
+            this._comboTimer -= dt;
+            if (this._comboTimer <= 0) this._comboLevel = 0;
+        }
 
         // ---- 逻辑推进（固定步长） ----
         if (!this.paused && this._core.alive) {
@@ -321,18 +386,30 @@ export class SnakeView extends Component {
 
         if (result === StepResult.EAT) {
             this._eatPop = 1;
+            this._refreshHud();
+            this._bumpCombo();
             const h = this._core.snake[0];
             this._spawnBurst(this._cellToPixel(h.x, h.y), 16);
             this._shake(0.10, 3.2);
             this._refreshHud();
+            if (this.onEat) this.onEat(this._comboLevel);
         } else if (result === StepResult.HIT_WALL || result === StepResult.HIT_SELF) {
             const h = this._core.snake[0];
             this._spawnBurst(this._cellToPixel(h.x, h.y), 26);
             this._shake(0.34, 9);
             this._deathFlash = 1;
+            this._comboLevel = 0;
+            this._comboTimer = 0;
+            const prevBest = this.best;
             if (this._core.score > this.best) this.best = this._core.score;
-            this._setOverlay('GAME OVER', '按 R 重开  ·  空格 暂停');
+            const isRecord = this._core.score > prevBest && this._core.score > 0;
+            this.saveBest(this.best);
+            this._setOverlay('GAME OVER', isRecord
+                ? `新纪录 ${this._core.score} 分！按 R 重开`
+                : `分数 ${this._core.score}  ·  最高 ${this.best}  ·  按 R 重开`);
             this._refreshHud();
+            if (this.onDeath) this.onDeath();
+            if (isRecord && this.onNewRecord) this.onNewRecord();
             if (this.onGameOver) this.onGameOver(this._core.score);
         }
     }

@@ -1,0 +1,74 @@
+# =====================================================================
+# .gitattributes —— 明确告诉 git 怎么处理每一类文件
+#
+# 为什么需要它：
+#   1. **换行符**：Windows 用 CRLF、Mac/Linux 用 LF。没有约束时，
+#      一个 Windows 开发者提交后，Mac 同事会看到"整个文件都改了"的假 diff，
+#      真实改动被淹没，code review 直接失效。
+#      这里统一约定：**仓库里永远存 LF**，检出时按平台自动转换。
+#   2. **二进制文件**：告诉 git 不要尝试做文本 diff / 行尾转换，
+#      否则可能损坏文件（尤其是音频、图片、模型）。
+# =====================================================================
+
+# 默认：自动识别文本，仓库内统一 LF
+* text=auto eol=lf
+
+# ---------------------------------------------------------------------
+# 明确指定为文本的源码与配置（保证 LF 且做 diff）
+# ---------------------------------------------------------------------
+*.ts        text eol=lf
+*.js        text eol=lf
+*.json      text eol=lf
+*.md        text eol=lf
+*.py        text eol=lf
+*.html      text eol=lf
+*.css       text eol=lf
+*.txt       text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.gitignore text eol=lf
+
+# Cocos 序列化文件（场景 / 预制体 / 资源元数据）都是 JSON，必须按文本处理
+*.scene     text eol=lf
+*.prefab    text eol=lf
+*.meta      text eol=lf
+*.mtl       text eol=lf
+
+# ---------------------------------------------------------------------
+# 二进制：禁止行尾转换与文本 diff
+# ---------------------------------------------------------------------
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.webp      binary
+*.ico       binary
+
+# 音频
+*.wav       binary
+*.mp3       binary
+*.ogg       binary
+*.m4a       binary
+
+# 字体
+*.ttf       binary
+*.otf       binary
+*.woff      binary
+*.woff2     binary
+
+# 3D 模型与贴图源
+*.fbx       binary
+*.obj       binary
+*.gltf      binary
+*.glb       binary
+*.bin       binary
+*.plist     binary
+*.psd       binary
+*.exr       binary
+*.hdr       binary
+
+# 其它
+*.zip       binary
+*.7z        binary
+*.exe       binary
+*.dll       binary

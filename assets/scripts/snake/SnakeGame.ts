@@ -1,5 +1,6 @@
 import { _decorator, Component, Node, EventKeyboard, EventTouch, Input, input, KeyCode, Vec2, view, director, Director, Canvas } from 'cc';
 import { SnakeView } from './SnakeView';
+import { SnakeAudio } from './SnakeAudio';
 import { DIR_UP, DIR_DOWN, DIR_LEFT, DIR_RIGHT, Dir } from './SnakeCore';
 
 const { ccclass, property } = _decorator;
@@ -11,13 +12,19 @@ const { ccclass, property } = _decorator;
  *   W A S D / 方向键  转向
  *   R                 重开
  *   空格              暂停 / 继续
+ *   M                 静音切换
  *   鼠标拖拽 / 触屏滑动  转向（为抖音小游戏准备的触屏方案）
  *
  * 输入设计要点：
- *   1. 键盘按下即记录「待执行方向」，在 update 里交给核心的**输入缓冲队列**，
- *      而不是直接改方向 —— 这样快速连按两次（比如向上时按左再按下）不会丢输入。
- *   2. 触屏用「起点→终点」位移量判定滑动方向，阈值可调。
+ *   1. 键盘按下**立即**写进逻辑层的输入缓冲队列，不攒到下一帧 ——
+ *      攒一帧就多 16ms 延迟，操作手感上这是能感知的。
+ *   2. 触屏用「起点 -> 终点」位移量判定滑动方向，阈值可调。
  *   3. 所有监听在 onDestroy 里成对解绑，避免场景切换后回调指向已销毁节点。
+ *
+ * 架构分工（三层，互不知道对方实现）：
+ *   SnakeView  —— 发生什么（渲染 + 事件广播）
+ *   SnakeAudio —— 怎么响（订阅事件）
+ *   SnakeGame  —— 谁跟谁接（输入 + 装配）
  */
 @ccclass('SnakeGame')
 export class SnakeGame extends Component {
@@ -25,7 +32,11 @@ export class SnakeGame extends Component {
     @property({ tooltip: '滑动判定的最小位移（像素）' })
     public swipeThreshold = 24;
 
+    @property({ tooltip: '是否启用音效' })
+    public enableAudio = true;
+
     private _view: SnakeView | null = null;
+    private _audio: SnakeAudio | null = null;
     private _pending: Dir | null = null;
 
     private _touchStart: Vec2 = new Vec2();
@@ -36,15 +47,21 @@ export class SnakeGame extends Component {
         const canvas = this.node.getComponent(Canvas);
         if (!canvas) {
             const parent = this.node.parent;
-            if (parent && parent.getComponent(Canvas)) {
-                // 已经在一个 Canvas 之下，位置也正确
-            } else {
+            if (!(parent && parent.getComponent(Canvas))) {
                 console.warn('[SnakeGame] 建议把它挂在 Canvas 节点上，否则可能不被渲染');
             }
         }
 
+        // ---- 装配：View 与 Audio 都挂到同一个节点下 ----
         this._view = this.node.getComponent(SnakeView);
         if (!this._view) this._view = this.node.addComponent(SnakeView);
+
+        if (this.enableAudio) {
+            this._audio = this.node.getComponent(SnakeAudio);
+            if (!this._audio) this._audio = this.node.addComponent(SnakeAudio);
+            // 接线：把音频订阅到 View 的事件上
+            this._audio.bind(this._view);
+        }
 
         this._view.setDirectionProvider(() => {
             const d = this._pending;
@@ -56,7 +73,7 @@ export class SnakeGame extends Component {
         input.on(Input.EventType.TOUCH_START, this._onTouchStart, this);
         input.on(Input.EventType.TOUCH_END, this._onTouchEnd, this);
 
-        console.log('[SnakeGame] 已启动 | WASD/方向键 转向 · R 重开 · 空格 暂停 · 触屏滑动也可');
+        console.log('[SnakeGame] 已启动 | WASD/方向键 转向 · R 重开 · 空格 暂停 · M 静音 · 触屏滑动');
     }
 
     onDestroy() {
@@ -94,6 +111,9 @@ export class SnakeGame extends Component {
                     v.setPaused(!v.paused);
                     console.log('[SnakeGame]', v.paused ? '暂停' : '继续');
                 }
+                break;
+            case KeyCode.KEY_M:
+                if (this._audio) this._audio.toggleMute();
                 break;
             default:
                 break;
