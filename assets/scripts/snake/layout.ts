@@ -151,14 +151,14 @@ export function computeLayout(vp: Viewport, cols: number, rows: number): LayoutR
     //     按钮带（TOP_BTN_ROW_H）：只放 音效 / 暂停 / 菜单
     //     标题带（其余高度）：标题 + 分数，与按钮带完全不重叠
     //   所有位置由常量推导，不手写魔法数字。
-    const btnH = 40;
-    const btnW = 70;
+    const btnH = 42;
+    const btnW = 76;
     const topRowCy = vh / 2 - insetTop - TOP_BTN_ROW_H / 2;
 
     // 按钮带内水平排布：菜单在左，音效与暂停在右，中间留给标题带
-    const menuW = 66;
+    const menuW = 76;
     const pauseX = vw / 2 - insetRight - btnW / 2 - 6;
-    const muteX = pauseX - btnW - 6;
+    const muteX = pauseX - btnW - 8;
     const menuX = -vw / 2 + insetLeft + menuW / 2 + 6;
 
     // 标题带：从按钮带下沿开始，依次排标题与分数

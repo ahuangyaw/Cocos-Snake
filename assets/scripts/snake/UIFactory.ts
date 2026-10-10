@@ -1,4 +1,4 @@
-import { Node, Label, Graphics, UITransform, Button, Color, HorizontalTextAlignment, VerticalTextAlignment, UIOpacity } from 'cc';
+import { Node, Label, Graphics, UITransform, Button, Color, HorizontalTextAlignment, VerticalTextAlignment, UIOpacity, LabelOutline } from 'cc';
 
 /**
  * UI 控件工厂 —— 用代码构建可交互控件，不依赖任何预制体
@@ -13,18 +13,32 @@ import { Node, Label, Graphics, UITransform, Button, Color, HorizontalTextAlignm
  *   「结构用代码立骨架，视觉细节用预制体交给美术」。
  */
 
-/** UI 配色（与 SnakeView 的 PALETTE 保持一致的色系） */
+/**
+ * UI 配色。
+ *
+ * 【一次真实的教训：按钮「存在但看不见」】
+ *   第一版按钮底色是 (38,48,70) —— 在纯黑背景上几乎与背景融为一体，
+ *   叠加 emoji 图标（Canvas 系统字体没有 emoji 字形，显示为空），
+ *   结果就是「按钮明明渲染了，但看起来像没画出来」。
+ *
+ *   结论：深色主题下，控件的**对比度必须显著高于背景**，不能只靠"稍微亮一点"。
+ *   这里的底色亮度大约是中灰蓝，配合 2px 亮描边，在纯黑与深蓝棋盘上都能看清。
+ *   另外：**不要用 emoji 当图标** —— 不同平台字形支持不一致，Web 上常直接空白。
+ */
 export const UI = {
-    btnBg: new Color(38, 48, 70, 235),
-    btnBorder: new Color(74, 92, 128, 255),
-    btnText: new Color(214, 226, 248, 255),
-    btnBgOn: new Color(28, 62, 46, 235),
-    btnTextOn: new Color(126, 231, 135, 255),
+    // 常驻按钮：中灰蓝底 + 亮描边，保证在深色背景上清晰可辨
+    btnBg: new Color(74, 92, 128, 245),
+    btnBorder: new Color(140, 166, 210, 255),
+    btnText: new Color(238, 245, 255, 255),
 
-    // 「主要操作」按钮样式（例如主菜单的「开始游戏」）
-    btnPrimaryBg: new Color(38, 132, 74, 245),
-    btnPrimaryBorder: new Color(96, 220, 130, 255),
-    btnPrimaryText: new Color(238, 255, 242, 255),
+    // 「开启」态（例如已静音）：绿底区分
+    btnBgOn: new Color(46, 118, 78, 245),
+    btnTextOn: new Color(226, 255, 234, 255),
+
+    // 「主要操作」按钮样式（主菜单的「开始游戏」）
+    btnPrimaryBg: new Color(46, 150, 88, 250),
+    btnPrimaryBorder: new Color(130, 240, 160, 255),
+    btnPrimaryText: new Color(245, 255, 248, 255),
 
     menuTitle: new Color(126, 231, 135, 255),
     menuSub: new Color(150, 168, 200, 255),
@@ -151,6 +165,11 @@ export function makeButton(
         HorizontalTextAlignment.CENTER, width - 16);
     label.string = text;
 
+    // 文字描边：中灰蓝底上的白字再加一圈暗描边，边缘更清晰、更像"按钮"
+    const outline = label.node.addComponent(LabelOutline);
+    outline.color = new Color(12, 18, 30, 220);
+    outline.width = 2;
+
     const opacity = visual.addComponent(UIOpacity);
     opacity.opacity = 255;
 
@@ -205,8 +224,8 @@ function drawButtonBg(g: Graphics, w: number, h: number, bg: Color, border: Colo
     g.roundRect(-w / 2, -h / 2, w, h, r);
     g.fill();
 
-    // 描边：让按钮在深色背景上有清晰边界
-    g.lineWidth = 2;
+    // 描边：深色背景上这是让按钮"可辨认"的关键，不能省
+    g.lineWidth = 2.5;
     g.strokeColor = border;
     g.roundRect(-w / 2 + 1, -h / 2 + 1, w - 2, h - 2, r);
     g.stroke();

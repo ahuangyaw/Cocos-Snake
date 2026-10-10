@@ -200,17 +200,18 @@ export class GameSession extends Component {
     private _buildPersistentButtons() {
         // 尺寸先给占位值，真实位置与尺寸由 _applyLayout 从布局结果设置。
         // 这里刻意不在构建时算坐标 —— 那时 SnakeView 可能还没就绪。
+        // 文字一律用纯文本，不用 emoji（Canvas 字体缺字形会渲染成空白）。
         const h = 40;
         const w = 74;
 
         this._btnMute = makeButton('BtnMute', this.node, 0, 0, w, h,
-            '🔊', 18, () => this._toggleMute());
+            '音效', 18, () => this._toggleMute());
 
         this._btnPause = makeButton('BtnPause', this.node, 0, 0, w, h,
-            '暂停', 17, () => this._togglePause());
+            '暂停', 18, () => this._togglePause());
 
         this._btnMenu = makeButton('BtnMenu', this.node, 0, 0, w, h,
-            '菜单', 17, () => this._backToMenu());
+            '菜单', 18, () => this._backToMenu());
 
         this._persistentBtns = [this._btnMute, this._btnPause, this._btnMenu];
     }
@@ -228,10 +229,17 @@ export class GameSession extends Component {
         this._syncMuteButton(muted);
     }
 
-    /** 静音按钮外观与实际状态同步（初始化与切换都走这里，避免两处不一致） */
+    /**
+     * 静音按钮外观与实际状态同步。
+     *
+     * 注意：用**纯文字**而不是 emoji。
+     * Canvas 的系统字体通常没有 emoji 字形，`🔊` 会直接渲染成空白 ——
+     * 这个坑真实踩过（按钮看起来是空的）。跨平台可靠的图标要么用贴图，
+     * 要么用文字，要么用 Graphics 自己画。
+     */
     private _syncMuteButton(muted: boolean) {
         if (!this._btnMute) return;
-        this._btnMute.setText(muted ? '🔇 静音' : '🔊 音效');
+        this._btnMute.setText(muted ? '静音中' : '音效');
         this._btnMute.setOn(muted);
     }
 
