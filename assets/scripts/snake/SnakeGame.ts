@@ -1,10 +1,13 @@
-import { _decorator, Component, EventKeyboard, EventTouch, Input, input, KeyCode, Vec2, view, sys, Canvas, ResolutionPolicy } from 'cc';
+import { _decorator, Component, EventKeyboard, EventTouch, Input, input, KeyCode, Vec2, view, screen, sys, Canvas, ResolutionPolicy } from 'cc';
 import { SnakeView } from './SnakeView';
 import { SnakeAudio } from './SnakeAudio';
 import { GameSession } from './GameSession';
 import { DIR_UP, DIR_DOWN, DIR_LEFT, DIR_RIGHT, Dir } from './SnakeCore';
 
 const { ccclass, property } = _decorator;
+
+const DESIGN_W = 720;
+const DESIGN_H = 1280;
 
 /**
  * SnakeGame —— 输入层与总装配（唯一需要手动挂到 Canvas 上的组件）
@@ -17,15 +20,18 @@ const { ccclass, property } = _decorator;
  *   滑动屏幕          转向
  *   屏幕上的按钮       静音 / 暂停 / 菜单 / 开始 / 再来一局
  *
- * 【组件挂载顺序是刻意设计的】
- *   本组件按 GameSession -> SnakeAudio -> SnakeView 的顺序 addComponent。
- *   Cocos 按 _components 数组顺序调用 onLoad，所以：
- *     - GameSession 最先 onLoad，可以安全地先建好界面
- *     - SnakeView 最后 onLoad，此时它的引用与界面都已就绪
- *   最后由本组件调用 session.bind() 正式启动状态机。
+ * 【一个必须记住的引擎生命周期事实】
+ *   `addComponent()` 返回后，该组件的 `onLoad` **不会立刻执行** ——
+ *   它要等本帧稍后的激活阶段。而 `getComponent()` 只返回**已经加载**的组件。
  *
- *   这个顺序不是巧合 —— 引擎里「谁先初始化」是最常见的隐性 bug 来源，
- *   所以把它显式化，而不是听天由命。
+ *   所以：在 A 的 onLoad 里 addComponent(B)，然后在同一个 onLoad 里
+ *   getComponent(B) 会拿到 **null**！
+ *
+ *   本组件最初就踩了这个坑：Session.bind() 在 onLoad 里拿不到 SnakeView，
+ *   直接 return，导致状态机从未启动 -> 游戏没冻结（蛇立刻开始跑）、
+ *   输入层因状态不是 PLAYING 而拒绝所有按键。
+ *
+ *   解决办法：所有「跨组件接线」都推迟到第一帧 update 里做（见 _tryBind）。
  */
 @ccclass('SnakeGame')
 export class SnakeGame extends Component {
@@ -36,10 +42,6 @@ export class SnakeGame extends Component {
     @property({ tooltip: '是否启用音效' })
     public enableAudio = true;
 
-    /**
-     * 竖屏设计分辨率。
-     * FIXED_WIDTH：宽度永远铺满屏幕，高度按设备比例自适应。
-     */
     @property({ tooltip: '强制竖屏设计分辨率（抖音小游戏需要）' })
     public forcePortrait = true;
 
@@ -50,15 +52,23 @@ export class SnakeGame extends Component {
     private _audio: SnakeAudio | null = null;
     private _session: GameSession | null = null;
 
+    /** 是否已完成接线 */
+    private _bound = false;
+    /** 音频延后到用户手势后初始化（浏览器自动播放限制） */
+    private _audioPending = false;
+
     private _touchStart: Vec2 = new Vec2();
     private _touchActive = false;
 
     onLoad() {
-        // ---------- ① 屏幕适配（必须在构建界面之前） ----------
-        if (this.forcePortrait) {
-            view.setDesignResolutionSize(720, 1280, ResolutionPolicy.FIXED_WIDTH);
-        }
-        this._logSafeArea();
+        // ---------- ① 屏幕适配 ----------
+        this._applyDesignResolution();
+
+        // 屏幕尺寸/方向变化时重新适配并重建布局。
+        // 3.8 起用 screen.on 监听（view.setResizeCallback 已废弃）。
+        // 开发时在浏览器 DevTools 里切换设备，走的就是这个事件。
+        screen.on('window-resize', this._onScreenResize, this);
+        screen.on('orientation-change', this._onScreenResize, this);
 
         // ---------- ② 校验挂载位置 ----------
         const canvas = this.node.getComponent(Canvas);
@@ -69,29 +79,26 @@ export class SnakeGame extends Component {
             }
         }
 
-        // ---------- ③ 装配（顺序见类注释） ----------
+        // ---------- ③ 装配（顺序很重要，见类注释） ----------
+        // GameSession 先挂：它的 onLoad 最先跑，可以先建好界面
         this._session = this.node.getComponent(GameSession);
         if (!this._session) this._session = this.node.addComponent(GameSession);
         this._session.skipMenu = this.skipMenu;
 
-        if (this.enableAudio) {
-            this._audio = this.node.getComponent(SnakeAudio);
-            if (!this._audio) this._audio = this.node.addComponent(SnakeAudio);
-        }
-
+        // SnakeView 最后挂：它的 onLoad 最后跑，此时界面已就绪
         this._view = this.node.getComponent(SnakeView);
         if (!this._view) this._view = this.node.addComponent(SnakeView);
 
-        // 音频订阅渲染层的事件（音频层不知道玩法，渲染层不知道声音）
-        if (this._audio) this._audio.bind(this._view);
+        // 让 Session 在用户手势时回调本组件以解锁音频
+        this._session.onUserGesture = () => this._unlockAudio();
 
-        // ---------- ④ 启动状态机（所有组件已就绪） ----------
-        this._session.bind();
-
-        // ---------- ⑤ 输入监听 ----------
+        // ---------- ④ 输入监听 ----------
         input.on(Input.EventType.KEY_DOWN, this._onKeyDown, this);
         input.on(Input.EventType.TOUCH_START, this._onTouchStart, this);
         input.on(Input.EventType.TOUCH_END, this._onTouchEnd, this);
+
+        // 注意：音频与状态机的接线**不在这里做**，见 update() 里的 _tryBind
+        this._audioPending = this.enableAudio;
 
         console.log('[SnakeGame] 已启动 | 触摸或键盘操作');
     }
@@ -100,6 +107,68 @@ export class SnakeGame extends Component {
         input.off(Input.EventType.KEY_DOWN, this._onKeyDown, this);
         input.off(Input.EventType.TOUCH_START, this._onTouchStart, this);
         input.off(Input.EventType.TOUCH_END, this._onTouchEnd, this);
+        screen.off('window-resize', this._onScreenResize, this);
+        screen.off('orientation-change', this._onScreenResize, this);
+    }
+
+    private _applyDesignResolution() {
+        if (!this.forcePortrait) return;
+        try {
+            view.setDesignResolutionSize(DESIGN_W, DESIGN_H, ResolutionPolicy.FIXED_WIDTH);
+        } catch (e) {
+            console.warn('[SnakeGame] 设置设计分辨率失败:', e);
+        }
+        this._logSafeArea();
+    }
+
+    /**
+     * 第一帧完成接线。
+     *
+     * 为什么不在 onLoad 里做：见类注释 —— addComponent 之后组件的 onLoad
+     * 尚未执行，getComponent 拿不到它。等到第一帧，所有 onLoad 必然已完成。
+     */
+    update(dt: number) {
+        if (this._bound) return;
+
+        // 防御：理论上第一帧一定就绪，但拿不到就再等一帧，不要静默失败
+        const view = this.node.getComponent(SnakeView);
+        if (!view) return;
+        this._view = view;
+
+        // 音频延后到用户手势后再初始化。
+        // 浏览器与移动端都禁止在无用户交互时启动 AudioContext，
+        // 页面加载就播声音会被拦截（Console 里的 AudioContext 警告就是这个）。
+        // 这里先不创建，等第一次触摸/点击时再建。
+        if (this._audioPending && !this._audio) {
+            // 标记待创建，由 _unlockAudio 完成
+        }
+
+        // 状态机启动（此时 Session 与 View 都已就绪）
+        if (this._session) {
+            this._session.bind();
+        }
+        this._bound = true;
+    }
+
+    /** 首次用户手势：创建音频并把 AudioContext 解锁 */
+    private _unlockAudio() {
+        if (!this.enableAudio || this._audio) return;
+        this._audioPending = false;
+        this._audio = this.node.getComponent(SnakeAudio);
+        if (!this._audio) this._audio = this.node.addComponent(SnakeAudio);
+        if (this._view) this._audio.bind(this._view);
+        // 同步静音按钮外观（音频可能比界面晚就绪）
+        if (this._session) this._session.syncAudioState();
+    }
+
+    /** 屏幕尺寸/方向变化：重新适配分辨率并让界面按新尺寸重建 */
+    private _onScreenResize() {
+        this._applyDesignResolution();
+        if (this._session && this._session.state) {
+            // 重建界面：布局、按钮位置、覆盖层尺寸都会随之更新
+            if (this._view) this._view.rebuildForResize();
+            this._session.rebuildForResize();
+        }
     }
 
     /**
@@ -126,6 +195,9 @@ export class SnakeGame extends Component {
     // 键盘
     // ==================================================================
     private _onKeyDown(e: EventKeyboard) {
+        // 首次按键也算用户手势，同样可以解锁音频
+        this._unlockAudio();
+
         const s = this._session;
 
         switch (e.keyCode) {
@@ -183,6 +255,9 @@ export class SnakeGame extends Component {
     // 触屏 / 鼠标滑动
     // ==================================================================
     private _onTouchStart(e: EventTouch) {
+        // 首次触摸：解锁音频（浏览器/移动端要求音频必须由用户手势触发）
+        this._unlockAudio();
+
         const p = e.getUILocation();
         this._touchStart.set(p.x, p.y);
         this._touchActive = true;

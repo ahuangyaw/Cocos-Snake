@@ -90,6 +90,11 @@ export class SnakeView extends Component {
     private _dyn!: Graphics;        // 动态层（每帧重绘）
     private _overlay!: Graphics;    // 覆盖层（暂停/结束）
 
+    // 需要随布局变化重新定位的节点/标签（resize 时用）
+    private _boardGroup: Node | null = null;
+    private _lblTitle2: Label | null = null;
+    private _lblHelp: Label | null = null;
+
     /** 布局结果，onLoad 时算一次 */
     private _L!: Layout;
 
@@ -161,14 +166,66 @@ export class SnakeView extends Component {
         this._core = new SnakeCore();
         this.loadBest();
 
+        // 先算布局，再按布局构建 —— 构建与定位分离，方便 resize 时只重定位
         this._L = this._computeLayout();
         this._buildLayers();
         this._buildHud();
-        this._dirtyBoard = true;
+        this._applyLayout();
 
         console.log(`[SnakeView] 竖屏布局：格子 ${this._L.cell.toFixed(1)}px，` +
             `棋盘 ${this._L.boardW.toFixed(0)}x${this._L.boardH.toFixed(0)}，` +
             `安全区上${this._L.insetTop.toFixed(0)}下${this._L.insetBottom.toFixed(0)}`);
+    }
+
+    /**
+     * 屏幕尺寸/方向变化时重建布局（浏览器 DevTools 切设备、手机横竖屏翻转都会触发）。
+     * 只重新算布局并重定位，不重建节点 —— 省开销，也避免重建带来的状态丢失。
+     */
+    public rebuildForResize() {
+        if (!this._core) return;      // 还没 onLoad 完，忽略
+        this._L = this._computeLayout();
+        this._applyLayout();
+        this._dirtyBoard = true;
+        console.log(`[SnakeView] 屏幕变化，重建布局：格子 ${this._L.cell.toFixed(1)}px，` +
+            `棋盘 ${this._L.boardW.toFixed(0)}x${this._L.boardH.toFixed(0)}`);
+    }
+
+    /** 依据 _L 定位所有节点（onLoad 与 resize 共用同一套逻辑） */
+    private _applyLayout() {
+        const L = this._L;
+
+        if (this._boardGroup) {
+            this._boardGroup.setPosition(L.boardCx, L.boardCy, 0);
+        }
+        if (this._board) {
+            const ui = this._board.node.getComponent(UITransform);
+            if (ui) ui.setContentSize(L.boardW + 40, L.boardH + 40);
+        }
+        if (this._dyn) {
+            const ui = this._dyn.node.getComponent(UITransform);
+            if (ui) ui.setContentSize(L.boardW + 40, L.boardH + 40);
+        }
+        if (this._overlay) {
+            const ui = this._overlay.node.getComponent(UITransform);
+            if (ui) ui.setContentSize(L.vw * 2, L.vh * 2);
+        }
+
+        // HUD 标签
+        if (this._lblTitle2) this._lblTitle2.node.setPosition(0, L.hudTitleY, 0);
+        if (this._lblScore) this._lblScore.node.setPosition(0, L.hudScoreY, 0);
+        if (this._lblBest) this._lblBest.node.setPosition(-L.vw / 2 + 88, L.hudSubY, 0);
+        if (this._lblSpeed) this._lblSpeed.node.setPosition(L.vw / 2 - 88, L.hudSubY, 0);
+        if (this._lblHelp) this._lblHelp.node.setPosition(0, L.hudHintY, 0);
+        if (this._lblTitle) this._lblTitle.node.setPosition(0, L.boardCy + 26, 0);
+        if (this._lblTip) this._lblTip.node.setPosition(0, L.boardCy - 30, 0);
+        for (const lb of [this._lblTitle, this._lblTip]) {
+            if (!lb) continue;
+            const ui = lb.node.getComponent(UITransform);
+            if (ui) ui.setContentSize(L.vw, 60);
+        }
+
+        // 棋盘中心也影响覆盖层文字的横向居中（目前为 0），保持同步
+        if (this._dyn) this._dynBaseX = 0;
     }
 
     /**
@@ -222,13 +279,13 @@ export class SnakeView extends Component {
     }
 
     private _buildLayers() {
-        // 棋盘组：整体偏移到布局算出的棋盘中心。
+        // 棋盘组：整体偏移到布局算出的棋盘中心（位置由 _applyLayout 设置）。
         // 这样一来，棋盘内所有绘制代码都能用「以棋盘中心为原点」的坐标，
         // 不必到处加上中心偏移 —— 少一处偏移就少一类 bug。
         const group = new Node('BoardGroup');
         group.layer = this.node.layer;
         this.node.addChild(group);
-        group.setPosition(this._L.boardCx, this._L.boardCy, 0);
+        this._boardGroup = group;
 
         this._dynBaseX = 0;
         this._dynBaseY = 0;
@@ -237,8 +294,6 @@ export class SnakeView extends Component {
         this._dyn = this._makeGraphics('Dynamic', group);
         // 覆盖层铺满整屏，所以挂在根节点上、不加棋盘偏移
         this._overlay = this._makeGraphics('Overlay', this.node);
-        const oui = this._overlay.node.getComponent(UITransform);
-        if (oui) oui.setContentSize(this._L.vw * 2, this._L.vh * 2);
     }
 
     private _makeLabel(name: string, x: number, y: number, size: number,
@@ -262,38 +317,33 @@ export class SnakeView extends Component {
         const L = this._L;
 
         // ---- 顶部：标题 ----
-        const title = this._makeLabel('Title', 0, L.hudTitleY, 15, PALETTE.hudDim,
+        const title = this._makeLabel('Title', 0, 0, 15, PALETTE.hudDim,
             HorizontalTextAlignment.CENTER);
         title.string = 'SNAKE';
+        this._lblTitle2 = title;
 
         // ---- 顶部主行：分数（大）----
-        this._lblScore = this._makeLabel('Score', 0, L.hudScoreY, 44, PALETTE.hudText,
+        this._lblScore = this._makeLabel('Score', 0, 0, 44, PALETTE.hudText,
             HorizontalTextAlignment.CENTER);
 
-        // ---- 分数下方两侧：最高分 / 速度 ----
-        const sideY = L.hudSubY;
-        this._lblBest = this._makeLabel('Best', -L.vw / 2 + 88, sideY, 18, PALETTE.hudDim,
+        // ---- 分数下方两侧：最高分 / 速度（位置由 _applyLayout 设置）----
+        this._lblBest = this._makeLabel('Best', 0, 0, 18, PALETTE.hudDim,
             HorizontalTextAlignment.CENTER);
 
-        this._lblSpeed = this._makeLabel('Speed', L.vw / 2 - 88, sideY, 18, PALETTE.hudDim,
+        this._lblSpeed = this._makeLabel('Speed', 0, 0, 18, PALETTE.hudDim,
             HorizontalTextAlignment.CENTER);
 
         // ---- 底部：操作提示 ----
-        const help = this._makeLabel('Help', 0, L.hudHintY, 15, PALETTE.hudDim,
+        const help = this._makeLabel('Help', 0, 0, 15, PALETTE.hudDim,
             HorizontalTextAlignment.CENTER);
         help.string = '滑动屏幕 / WASD 转向 · R 重开 · 空格 暂停 · M 静音';
+        this._lblHelp = help;
 
-        // ---- 覆盖层文字（居中在棋盘上）----
-        this._lblTitle = this._makeLabel('OverlayTitle', 0, L.boardCy + 26, 46,
+        // ---- 覆盖层文字（居中在棋盘上，位置由 _applyLayout 设置）----
+        this._lblTitle = this._makeLabel('OverlayTitle', 0, 0, 46,
             new Color(255, 255, 255, 255), HorizontalTextAlignment.CENTER);
-        this._lblTip = this._makeLabel('OverlayTip', 0, L.boardCy - 30, 19,
+        this._lblTip = this._makeLabel('OverlayTip', 0, 0, 19,
             new Color(200, 214, 240, 255), HorizontalTextAlignment.CENTER);
-
-        // 覆盖层文字要能盖住棋盘，宽度给足
-        for (const lb of [this._lblTitle, this._lblTip]) {
-            const ui = lb.node.getComponent(UITransform);
-            if (ui) ui.setContentSize(L.vw, 60);
-        }
 
         this._refreshHud();
     }

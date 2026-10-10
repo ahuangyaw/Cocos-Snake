@@ -1,4 +1,4 @@
-import { _decorator, Component, Node, Label, Color, view, sys, HorizontalTextAlignment, UITransform } from 'cc';
+import { _decorator, Component, Node, Label, Color, Graphics, view, sys, HorizontalTextAlignment, UITransform } from 'cc';
 import { SnakeView } from './SnakeView';
 import { SnakeAudio } from './SnakeAudio';
 import { GameState, StateMachine } from './StateMachine';
@@ -52,6 +52,10 @@ export class GameSession extends Component {
 
     private _vw = 0;
     private _vh = 0;
+    /** 覆盖层遮罩，resize 时需要重画尺寸 */
+    private _dimG: Graphics | null = null;
+    /** 常驻按钮与菜单按钮的引用，resize 时重新定位 */
+    private _persistentBtns: ButtonHandle[] = [];
 
     // ==================================================================
     // 生命周期
@@ -73,6 +77,7 @@ export class GameSession extends Component {
 
         this._buildPersistentButtons();
         this._buildOverlay();
+        this._applyLayout();
 
         // 初始状态先不设，等 SnakeGame 调用 bind() 之后再设。
         //
@@ -97,41 +102,98 @@ export class GameSession extends Component {
         view.onGameOver = () => this.notifyGameOver();
 
         // 同步一次静音按钮外观
-        if (this._audio && this._btnMute) {
-            const muted = this._audio.muted;
-            this._btnMute.setText(muted ? '🔇 静音' : '🔊 音效');
-            this._btnMute.setOn(muted);
-        }
+        if (this._audio) this._syncMuteButton(this._audio.muted);
 
         this._fsm.go(this.skipMenu ? GameState.PLAYING : GameState.MENU);
+    }
+
+    // ==================================================================
+    // 布局：位置全部从 _applyLayout 设置，resize 时复用同一套逻辑
+    // ==================================================================
+    private _applyLayout() {
+        const visible = view.getVisibleSize();
+        this._vw = visible.width;
+        this._vh = visible.height;
+
+        const topY = this._vh / 2 - 40;
+
+        // 常驻按钮（游戏中）：右上角两个 + 左上角一个
+        if (this._btnMute) this._btnMute.node.setPosition(this._vw / 2 - 132, topY, 0);
+        if (this._btnPause) this._btnPause.node.setPosition(this._vw / 2 - 48, topY, 0);
+        if (this._btnMenu) this._btnMenu.node.setPosition(-this._vw / 2 + 60, topY, 0);
+
+        // 覆盖层内容：标题在屏幕上部，按钮在屏幕下部
+        if (this._overlayRoot) {
+            const ui = this._overlayRoot.getComponent(UITransform);
+            if (ui) ui.setContentSize(this._vw, this._vh);
+        }
+        if (this._dimG) {
+            this._dimG.clear();
+            this._dimG.fillColor = new Color(6, 10, 18, 214);
+            this._dimG.rect(-this._vw, -this._vh, this._vw * 2, this._vh * 2);
+            this._dimG.fill();
+        }
+        if (this._menuTitle) {
+            this._menuTitle.node.setPosition(0, this._vh / 2 - 300, 0);
+            const ui = this._menuTitle.node.getComponent(UITransform);
+            if (ui) ui.setContentSize(this._vw, 80);
+        }
+        if (this._menuSub) {
+            this._menuSub.node.setPosition(0, this._vh / 2 - 372, 0);
+            const ui = this._menuSub.node.getComponent(UITransform);
+            if (ui) ui.setContentSize(this._vw, 40);
+        }
+        if (this._menuBtn) this._menuBtn.node.setPosition(0, -this._vh / 2 + 300, 0);
+        if (this._menuBtn2) this._menuBtn2.node.setPosition(0, -this._vh / 2 + 206, 0);
+    }
+
+    /** 屏幕尺寸/方向变化时重新定位（与 SnakeView.rebuildForResize 配合） */
+    public rebuildForResize() {
+        this._applyLayout();
+    }
+
+    /** 由 SnakeGame 在音频就绪后调用，同步一次静音按钮外观 */
+    public syncAudioState() {
+        if (this._audio) this._syncMuteButton(this._audio.muted);
     }
 
     // ==================================================================
     // 构建：常驻按钮（静音 / 暂停 / 菜单）
     // ==================================================================
     private _buildPersistentButtons() {
-        const topY = this._vh / 2 - 40;
         const h = 46;
         const w = 78;
 
-        // 三个按钮排在右下角，避开棋盘与顶部分数
-        this._btnMute = makeButton('BtnMute', this.node, this._vw / 2 - 132, topY, w, h,
+        this._btnMute = makeButton('BtnMute', this.node, 0, 0, w, h,
             '🔊 音效', 16, () => this._toggleMute());
 
-        this._btnPause = makeButton('BtnPause', this.node, this._vw / 2 - 48, topY, w, h,
+        this._btnPause = makeButton('BtnPause', this.node, 0, 0, w, h,
             '暂停', 17, () => this._togglePause());
 
-        this._btnMenu = makeButton('BtnMenu', this.node, -this._vw / 2 + 60, topY, w, h,
+        this._btnMenu = makeButton('BtnMenu', this.node, 0, 0, w, h,
             '菜单', 17, () => this._backToMenu());
+
+        this._persistentBtns = [this._btnMute, this._btnPause, this._btnMenu];
     }
 
     private _toggleMute() {
-        if (!this._audio) return;
-        const muted = this._audio.toggleMute();
-        if (this._btnMute) {
-            this._btnMute.setText(muted ? '🔇 静音' : '🔊 音效');
-            this._btnMute.setOn(muted);
+        // 点静音也算用户手势（首次点击时应在这里初始化音频）
+        if (this.onUserGesture) this.onUserGesture();
+
+        if (!this._audio) {
+            // 音频仍不可用：说明解锁失败（例如平台限制），给出明确提示而不是静默失败
+            console.warn('[GameSession] 音频组件不可用，静音按钮无效');
+            return;
         }
+        const muted = this._audio.toggleMute();
+        this._syncMuteButton(muted);
+    }
+
+    /** 静音按钮外观与实际状态同步（初始化与切换都走这里，避免两处不一致） */
+    private _syncMuteButton(muted: boolean) {
+        if (!this._btnMute) return;
+        this._btnMute.setText(muted ? '🔇 静音' : '🔊 音效');
+        this._btnMute.setOn(muted);
     }
 
     private _togglePause() {
@@ -165,27 +227,32 @@ export class GameSession extends Component {
         root.addComponent(UITransform).setContentSize(this._vw, this._vh);
         this._overlayRoot = root;
 
-        makeDimOverlay('Dim', root, this._vw, this._vh, 214);
+        this._dimG = makeDimOverlay('Dim', root, this._vw, this._vh, 214);
 
-        // 标题与副标题（不同状态换文字，所以只创建一次）
-        this._menuTitle = makeLabel('MenuTitle', root, 0, this._vh / 2 - 300, 62,
+        // 标题与副标题（不同状态换文字，所以只创建一次；位置由 _applyLayout 设置）
+        this._menuTitle = makeLabel('MenuTitle', root, 0, 0, 62,
             UI.menuTitle, HorizontalTextAlignment.CENTER, this._vw);
-        this._menuSub = makeLabel('MenuSub', root, 0, this._vh / 2 - 370, 20,
+        this._menuSub = makeLabel('MenuSub', root, 0, 0, 20,
             UI.menuSub, HorizontalTextAlignment.CENTER, this._vw);
 
         // 主按钮（菜单里是「开始游戏」，结束时是「再来一局」）
-        this._menuBtn = makeButton('MenuBtnMain', root, 0, -this._vh / 2 + 300, 260, 74,
+        this._menuBtn = makeButton('MenuBtnMain', root, 0, 0, 260, 74,
             '开始游戏', 30, () => this._onMainAction(), STYLE_PRIMARY);
 
         // 次按钮：菜单里隐藏；结束时用来「返回主菜单」
-        this._menuBtn2 = makeButton('MenuBtnSecondary', root, 0, -this._vh / 2 + 206, 200, 56,
+        this._menuBtn2 = makeButton('MenuBtnSecondary', root, 0, 0, 200, 56,
             '返回主菜单', 20, () => this._fsm.go(GameState.MENU), STYLE_DEFAULT);
     }
 
     /** 主按钮的行为随状态变化：菜单里是「开始」，结束时是「再来一局」 */
     private _onMainAction() {
+        // 点击也是用户手势 —— 音频解锁挂在 SnakeGame 上，这里通过回调通知它
+        if (this.onUserGesture) this.onUserGesture();
         this._fsm.go(GameState.PLAYING);
     }
+
+    /** 由 SnakeGame 注入：任何用户手势发生时调用（用于解锁音频） */
+    public onUserGesture: (() => void) | null = null;
 
     // ==================================================================
     // 状态变化 —— 界面在这里统一刷新，而不是到处散落 if
