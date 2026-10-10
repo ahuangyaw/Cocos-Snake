@@ -16,7 +16,7 @@ if (!layoutPath) {
     console.error('用法: node test_layout.js <编译后的 layout.js 路径>');
     process.exit(2);
 }
-const { computeLayout, MIN_BOARD_SIZE, MIN_CELL_SIZE } = require(path.resolve(layoutPath));
+const { computeLayout, MIN_BOARD_SIZE, MIN_CELL_SIZE, LAYOUT_CONST } = require(path.resolve(layoutPath));
 
 let passed = 0;
 let failed = 0;
@@ -86,13 +86,15 @@ for (const d of DEVICES) {
     // ② 棋盘上下沿都在屏幕内
     if (L.boardTopY > vh / 2 + 0.01) problems.push(`棋盘上沿 ${L.boardTopY.toFixed(1)} 超出屏幕顶 ${(vh / 2).toFixed(1)}`);
     if (L.boardBottomY < -vh / 2 - 0.01) problems.push(`棋盘下沿 ${L.boardBottomY.toFixed(1)} 低于屏幕底 ${(-vh / 2).toFixed(1)}`);
-    // ③ 不压住 HUD（分数那一行在棋盘上沿之上）
-    if (L.boardTopY > L.hudSubY - 4) {
-        problems.push(`棋盘上沿 ${L.boardTopY.toFixed(1)} 压到 HUD(底线 ${(L.hudSubY - 4).toFixed(1)})`);
+    // ③ 不压住 HUD / 底部提示 —— 统一用 layout.ts 导出的常量，
+    //    不再用「hudSubY - 4」这种估算法（会与实现漂移）
+    const hudBottom = vh / 2 - L.insetTop - LAYOUT_CONST.HUD_BLOCK_H;
+    const hintTop = -vh / 2 + L.insetBottom + LAYOUT_CONST.HINT_BLOCK_H;
+    if (L.boardTopY > hudBottom + 0.01) {
+        problems.push(`棋盘上沿 ${L.boardTopY.toFixed(0)} 压到 HUD(底线 ${hudBottom.toFixed(0)})`);
     }
-    // ④ 不压住底部提示
-    if (L.boardBottomY < L.hudHintY + 14) {
-        problems.push(`棋盘下沿 ${L.boardBottomY.toFixed(1)} 压到底部提示(y=${L.hudHintY.toFixed(1)})`);
+    if (L.boardBottomY < hintTop - 0.01) {
+        problems.push(`棋盘下沿 ${L.boardBottomY.toFixed(0)} 压到底部提示(顶线 ${hintTop.toFixed(0)})`);
     }
     // ⑤ 尺寸下限
     if (Math.min(L.boardW, L.boardH) < MIN_BOARD_SIZE - 0.01) {
@@ -101,9 +103,57 @@ for (const d of DEVICES) {
     if (L.cell < MIN_CELL_SIZE - 0.01) {
         problems.push(`格子只有 ${L.cell.toFixed(2)}，小于下限 ${MIN_CELL_SIZE}`);
     }
-    // ⑥ 棋盘在可用区间内垂直居中（上下余量差不超过 2px）
-    const topGap = (vh / 2 - L.insetTop - 78) - L.boardTopY;
-    const botGap = L.boardBottomY - (-vh / 2 + L.insetBottom + 34);
+    // ⑥ 棋盘与 HUD / 底部提示的间距已在 ③ 用同一份常量校验过，这里不重复。
+    // 顶部控件之间不能真交叠 —— 必须做**矩形相交**判断。
+    //
+    // 【为什么不能只比 y】标题在屏幕中央（x=0），菜单按钮在左侧（x≈-321），
+    //   两者垂直方向虽然接近，但水平完全不重叠 —— 只比 y 会大量误报。
+    //   第一版断言就是这个错误，报了 22 个假失败。
+    function overlap(ax, ay, aw, ah, bx, by, bw, bh) {
+        return Math.abs(ax - bx) * 2 < (aw + bw) && Math.abs(ay - by) * 2 < (ah + bh);
+    }
+
+    // 标题/分数这类居中文字，其 UITransform 宽度就是整屏宽
+    const fillW = vp.width;
+
+    // 标题文字（宽给整屏，高按字号估）+ 菜单按钮
+    if (overlap(0, L.hudTitleY, fillW, 28, L.hudMenuX, L.hudMenuY, L.hudMenuW, L.hudMenuH)) {
+        problems.push('菜单按钮与标题重叠');
+    }
+    // 标题 + 顶行按钮
+    if (overlap(0, L.hudTitleY, fillW, 28, L.hudMuteX, L.hudTopBtnY, L.hudTopBtnW, L.hudTopBtnH)) {
+        problems.push('音效按钮与标题重叠');
+    }
+    if (overlap(0, L.hudTitleY, fillW, 28, L.hudPauseX, L.hudTopBtnY, L.hudTopBtnW, L.hudTopBtnH)) {
+        problems.push('暂停按钮与标题重叠');
+    }
+    // 分数文字 + 菜单按钮
+    if (overlap(0, L.hudScoreY, fillW, 46, L.hudMenuX, L.hudMenuY, L.hudMenuW, L.hudMenuH)) {
+        problems.push('菜单按钮与分数重叠');
+    }
+    // 三个按钮互相之间
+    if (overlap(L.hudMuteX, L.hudTopBtnY, L.hudTopBtnW, L.hudTopBtnH,
+        L.hudPauseX, L.hudTopBtnY, L.hudTopBtnW, L.hudTopBtnH)) {
+        problems.push('音效与暂停按钮重叠');
+    }
+    // 棋盘与所有按钮
+    if (overlap(L.boardCx, L.boardCy, L.boardW, L.boardH,
+        L.hudMenuX, L.hudMenuY, L.hudMenuW, L.hudMenuH)) {
+        problems.push('菜单按钮压住棋盘');
+    }
+    if (overlap(L.boardCx, L.boardCy, L.boardW, L.boardH,
+        L.hudMuteX, L.hudTopBtnY, L.hudTopBtnW, L.hudTopBtnH)
+        || overlap(L.boardCx, L.boardCy, L.boardW, L.boardH,
+            L.hudPauseX, L.hudTopBtnY, L.hudTopBtnW, L.hudTopBtnH)) {
+        problems.push('顶行按钮压住棋盘');
+    }
+    // 按钮必须在屏幕内（注意：循环里用的是 vp（viewport 输入），不是 vw）
+    if (L.hudMenuX - L.hudMenuW / 2 < -vp.width / 2 + L.insetLeft - 0.01) {
+        problems.push('菜单按钮超出屏幕左边界');
+    }
+    if (L.hudPauseX + L.hudTopBtnW / 2 > vp.width / 2 - L.insetRight + 0.01) {
+        problems.push('暂停按钮超出屏幕右边界');
+    }
 
     const verdict = problems.length === 0 ? 'OK' : '问题: ' + problems.join('; ');
     if (problems.length > 0) failed++;

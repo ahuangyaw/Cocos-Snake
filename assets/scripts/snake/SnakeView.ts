@@ -216,8 +216,10 @@ export class SnakeView extends Component {
         if (this._lblBest) this._lblBest.node.setPosition(-L.vw / 2 + 88, L.hudSubY, 0);
         if (this._lblSpeed) this._lblSpeed.node.setPosition(L.vw / 2 - 88, L.hudSubY, 0);
         if (this._lblHelp) this._lblHelp.node.setPosition(0, L.hudHintY, 0);
-        if (this._lblTitle) this._lblTitle.node.setPosition(0, L.boardCy + 26, 0);
-        if (this._lblTip) this._lblTip.node.setPosition(0, L.boardCy - 30, 0);
+        // 覆盖层文字跟随棋盘中心（棋盘为了给左侧按钮让位而向右偏，
+        // 文字必须跟着一起偏，否则会看起来「飘在棋盘外面」）
+        if (this._lblTitle) this._lblTitle.node.setPosition(L.boardCx, L.boardCy + 26, 0);
+        if (this._lblTip) this._lblTip.node.setPosition(L.boardCx, L.boardCy - 30, 0);
         for (const lb of [this._lblTitle, this._lblTip]) {
             if (!lb) continue;
             const ui = lb.node.getComponent(UITransform);
@@ -377,6 +379,18 @@ export class SnakeView extends Component {
 
     public get core(): SnakeCore {
         return this._core;
+    }
+
+    /**
+     * 暴露布局结果，供 GameSession 定位按钮与菜单。
+     *
+     * 为什么不让 GameSession 自己算：
+     *   布局数学集中在一处（layout.ts，有单测覆盖），
+     *   界面层只读结果。否则两个组件各算一套坐标，迟早会不一致 ——
+     *   上一版「菜单按钮压住标题」就是这么来的。
+     */
+    public get layout(): Layout {
+        return this._L;
     }
 
     public restart() {

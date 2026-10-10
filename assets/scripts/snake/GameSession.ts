@@ -117,6 +117,10 @@ export class GameSession extends Component {
         // 同步一次静音按钮外观
         if (this._audio) this._syncMuteButton(this._audio.muted);
 
+        // 现在 SnakeView 已就绪，用它的布局结果重新定位按钮。
+        // onLoad 时 SnakeView 可能还不存在，那时用的是兜底尺寸。
+        this._applyLayout();
+
         // 首次成功接线时才启动状态机
         if (this._fsm.is(GameState.BOOT)) {
             this._fsm.go(this.skipMenu ? GameState.PLAYING : GameState.MENU);
@@ -128,18 +132,30 @@ export class GameSession extends Component {
     // 布局：位置全部从 _applyLayout 设置，resize 时复用同一套逻辑
     // ==================================================================
     private _applyLayout() {
+        // 布局的唯一来源是 SnakeView.layout（由 layout.ts 的纯函数算出，有单测）。
+        // 这里只做「把结果套到节点上」，不自己算坐标。
+        const view0 = this._view || this.node.getComponent(SnakeView);
         const visible = view.getVisibleSize();
-        this._vw = visible.width;
-        this._vh = visible.height;
 
-        const topY = this._vh / 2 - 40;
+        if (!view0) {
+            // SnakeView 还没就绪（接线阶段），先用可视尺寸兜底，
+            // 等 bind() 成功后会再调一次 _applyLayout
+            this._vw = visible.width;
+            this._vh = visible.height;
+            return;
+        }
+        const L = view0.layout;
+        this._vw = L.vw;
+        this._vh = L.vh;
 
-        // 常驻按钮（游戏中）：右上角两个 + 左上角一个
-        if (this._btnMute) this._btnMute.node.setPosition(this._vw / 2 - 132, topY, 0);
-        if (this._btnPause) this._btnPause.node.setPosition(this._vw / 2 - 48, topY, 0);
-        if (this._btnMenu) this._btnMenu.node.setPosition(-this._vw / 2 + 60, topY, 0);
+        // ---- 常驻按钮：位置与尺寸都来自布局 ----
+        if (this._btnMenu) {
+            this._btnMenu.node.setPosition(L.hudMenuX, L.hudMenuY, 0);
+        }
+        if (this._btnMute) this._btnMute.node.setPosition(L.hudMuteX, L.hudTopBtnY, 0);
+        if (this._btnPause) this._btnPause.node.setPosition(L.hudPauseX, L.hudTopBtnY, 0);
 
-        // 覆盖层内容：标题在屏幕上部，按钮在屏幕下部
+        // ---- 覆盖层铺满整屏 ----
         if (this._overlayRoot) {
             const ui = this._overlayRoot.getComponent(UITransform);
             if (ui) ui.setContentSize(this._vw, this._vh);
@@ -150,13 +166,17 @@ export class GameSession extends Component {
             this._dimG.rect(-this._vw, -this._vh, this._vw * 2, this._vh * 2);
             this._dimG.fill();
         }
+
+        // ---- 覆盖层内容：标题在上、按钮在下，都排布在安全区内 ----
+        // 注意棋盘中心是向右偏的（左侧让给了按钮），覆盖层文字以屏幕中心为准更协调。
+        const titleY = this._vh / 2 - 300;
         if (this._menuTitle) {
-            this._menuTitle.node.setPosition(0, this._vh / 2 - 300, 0);
+            this._menuTitle.node.setPosition(0, titleY, 0);
             const ui = this._menuTitle.node.getComponent(UITransform);
             if (ui) ui.setContentSize(this._vw, 80);
         }
         if (this._menuSub) {
-            this._menuSub.node.setPosition(0, this._vh / 2 - 372, 0);
+            this._menuSub.node.setPosition(0, titleY - 72, 0);
             const ui = this._menuSub.node.getComponent(UITransform);
             if (ui) ui.setContentSize(this._vw, 40);
         }
@@ -178,11 +198,13 @@ export class GameSession extends Component {
     // 构建：常驻按钮（静音 / 暂停 / 菜单）
     // ==================================================================
     private _buildPersistentButtons() {
-        const h = 46;
-        const w = 78;
+        // 尺寸先给占位值，真实位置与尺寸由 _applyLayout 从布局结果设置。
+        // 这里刻意不在构建时算坐标 —— 那时 SnakeView 可能还没就绪。
+        const h = 40;
+        const w = 74;
 
         this._btnMute = makeButton('BtnMute', this.node, 0, 0, w, h,
-            '🔊 音效', 16, () => this._toggleMute());
+            '🔊', 18, () => this._toggleMute());
 
         this._btnPause = makeButton('BtnPause', this.node, 0, 0, w, h,
             '暂停', 17, () => this._togglePause());
