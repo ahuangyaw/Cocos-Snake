@@ -42,8 +42,19 @@ export class SnakeGame extends Component {
     @property({ tooltip: '是否启用音效' })
     public enableAudio = true;
 
-    @property({ tooltip: '强制竖屏设计分辨率（抖音小游戏需要）' })
-    public forcePortrait = true;
+    /**
+     * 是否在运行时再强制一次竖屏设计分辨率。
+     *
+     * 【为什么默认关掉】
+     *   竖屏的正确配置位置是**工程设置**（`settings/v2/packages/project.json`
+     *   的 `general.designResolution`），而不是运行时代码。
+     *   实测：在浏览器预览里调用 `view.setDesignResolutionSize()` 未必生效
+     *   （预览容器有自己的尺寸策略），日志里会看到设计分辨率仍是 720x405。
+     *
+     *   所以真正的竖屏由工程设置保证；本开关只在个别平台需要额外兜底时才打开。
+     */
+    @property({ tooltip: '运行时再强制一次竖屏分辨率（一般不需要，竖屏应配在工程设置里）' })
+    public forcePortrait = false;
 
     @property({ tooltip: '跳过主菜单直接开始（调试用）' })
     public skipMenu = false;
@@ -54,6 +65,8 @@ export class SnakeGame extends Component {
 
     /** 是否已完成接线 */
     private _bound = false;
+    /** 接线重试计数（用于超时告警与日志） */
+    private _bindRetries = 0;
     /** 音频延后到用户手势后初始化（浏览器自动播放限制） */
     private _audioPending = false;
 
@@ -122,32 +135,41 @@ export class SnakeGame extends Component {
     }
 
     /**
-     * 第一帧完成接线。
+     * 接线：每帧尝试，直到成功为止（不静默失败）。
      *
-     * 为什么不在 onLoad 里做：见类注释 —— addComponent 之后组件的 onLoad
-     * 尚未执行，getComponent 拿不到它。等到第一帧，所有 onLoad 必然已完成。
+     * 为什么需要重试而不是只试一次：
+     *   组件可能是本组件在运行时 addComponent 挂上的，而 addComponent 之后
+     *   对方的 onLoad 要等本帧稍后的激活阶段才执行 —— 在同一个 onLoad 里
+     *   getComponent 拿不到它。等到下一帧虽然通常就绪，但不同启动路径
+     *   （手动挂载 / 自动挂载 / 热重载）时序并不完全一致。
+     *
+     *   与其赌「第一帧一定就绪」，不如老老实实重试到成功 ——
+     *   这比依赖精确时序可靠得多，而且失败会打日志，不会默默黑屏。
      */
     update(dt: number) {
         if (this._bound) return;
 
-        // 防御：理论上第一帧一定就绪，但拿不到就再等一帧，不要静默失败
         const view = this.node.getComponent(SnakeView);
-        if (!view) return;
+        if (!view) {
+            this._bindRetries++;
+            if (this._bindRetries > 120) {
+                // 大约 2 秒还拿不到，说明不是时序问题，而是真的缺组件
+                console.error('[SnakeGame] 等待 2 秒仍找不到 SnakeView，放弃接线。' +
+                    '请检查 assets/scripts/snake/ 下的脚本是否编译通过。');
+                this._bound = true;      // 停止刷屏
+            }
+            return;
+        }
         this._view = view;
 
-        // 音频延后到用户手势后再初始化。
-        // 浏览器与移动端都禁止在无用户交互时启动 AudioContext，
-        // 页面加载就播声音会被拦截（Console 里的 AudioContext 警告就是这个）。
-        // 这里先不创建，等第一次触摸/点击时再建。
-        if (this._audioPending && !this._audio) {
-            // 标记待创建，由 _unlockAudio 完成
+        // 把 Session 与 View 接起来。bind 自己会去取需要的组件，
+        // 拿不到就返回 false，下一帧继续。
+        if (this._session && !this._session.bind()) {
+            return;
         }
 
-        // 状态机启动（此时 Session 与 View 都已就绪）
-        if (this._session) {
-            this._session.bind();
-        }
         this._bound = true;
+        console.log('[SnakeGame] 接线完成（第 %d 帧）', this._bindRetries + 1);
     }
 
     /** 首次用户手势：创建音频并把 AudioContext 解锁 */

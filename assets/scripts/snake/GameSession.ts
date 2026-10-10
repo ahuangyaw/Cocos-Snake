@@ -65,9 +65,10 @@ export class GameSession extends Component {
         this._vw = visible.width;
         this._vh = visible.height;
 
-        // 拿到兄弟组件（顺序由 SnakeGame 保证：本组件先于 SnakeView 挂载）
-        this._view = this.node.getComponent(SnakeView);
-        this._audio = this.node.getComponent(SnakeAudio);
+        // 注意：这里**不要**去抢 SnakeView / SnakeAudio 的引用。
+        // 本组件可能是被 SnakeGame 运行时 addComponent 挂上的，
+        // 那一刻它们还没挂上，缓存下来的就是 null 且永远不会更新。
+        // 正确做法是在 bind() 里现取（见 bind 的说明）。
 
         this._fsm.onChange = (next, prev) => this._onStateChanged(next, prev);
         this._fsm.onIllegal = (from, to) => {
@@ -79,23 +80,35 @@ export class GameSession extends Component {
         this._buildOverlay();
         this._applyLayout();
 
-        // 初始状态先不设，等 SnakeGame 调用 bind() 之后再设。
-        //
-        // 为什么要这样：SnakeView 的 onLoad 晚于本组件，在 bind() 之前
-        // view.core 还不存在，此时若切到 GAME_OVER 去读 score 就会崩。
-        // 把「状态推进」延后到所有组件都就绪之后，是消除初始化顺序问题的标准做法。
+        // 初始状态先不设，等 bind() 成功后再推进 ——
+        // 那时 SnakeView 才存在，读 score / 控制 simulate 才安全。
     }
 
     /**
-     * 由 SnakeGame 在所有组件挂载完成后调用一次。
-     * 这里才真正启动状态机，并接上「渲染层广播的游戏结束事件」。
+     * 由 SnakeGame 调用（会重复调用直到成功）。
+     *
+     * 【为什么必须自己去 getComponent，而不是用 onLoad 时缓存的引用】
+     *   本组件可能是被 SnakeGame 在运行时 addComponent 挂上的。
+     *   那一刻 SnakeView 还没被挂上，所以 onLoad 里
+     *   `this.node.getComponent(SnakeView)` 拿到的是 **null**，
+     *   缓存在 this._view 里就一直是个过期的 null ——
+     *   bind() 拿着它必然失败。
+     *
+     *   教训：**不要缓存「在初始化阶段还拿不到的东西」**。
+     *   要么每次都重新取，要么明确地在就绪后再取。
+     *
+     * 返回值表示是否接线成功，失败时 SnakeGame 会在下一帧重试。
      */
-    public bind() {
-        const view = this._view;
+    public bind(): boolean {
+        // 每次都重新取，绝不用可能过期的缓存
+        const view = this.node.getComponent(SnakeView);
         if (!view) {
-            console.error('[GameSession] 找不到 SnakeView，无法启动');
-            return;
+            return false;      // 还没就绪，交给调用方重试
         }
+        this._view = view;
+
+        // 音频同样重新取（它可能是首次手势后才挂上的）
+        if (!this._audio) this._audio = this.node.getComponent(SnakeAudio);
 
         // 渲染层广播「本局结束」-> 状态机切到 GAME_OVER。
         // 注意方向是单向的：SnakeView 只知道"我死了"，不知道状态机怎么处理。
@@ -104,7 +117,11 @@ export class GameSession extends Component {
         // 同步一次静音按钮外观
         if (this._audio) this._syncMuteButton(this._audio.muted);
 
-        this._fsm.go(this.skipMenu ? GameState.PLAYING : GameState.MENU);
+        // 首次成功接线时才启动状态机
+        if (this._fsm.is(GameState.BOOT)) {
+            this._fsm.go(this.skipMenu ? GameState.PLAYING : GameState.MENU);
+        }
+        return true;
     }
 
     // ==================================================================
